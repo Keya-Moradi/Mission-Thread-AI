@@ -2,7 +2,31 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { config as loadEnv } from "dotenv";
-import { LOCAL_TEST_TARGETS, checkDestructiveOperationAllowed } from "../src/db-safety";
+import {
+  LOCAL_TEST_TARGETS,
+  checkDestructiveOperationAllowed,
+  classifySeedScopeError,
+  isTestSeedScope,
+} from "../src/db-safety";
+
+// Checked before anything else in this module runs — before dotenv is
+// loaded, before TEST_DATABASE_URL is read, and before
+// checkDestructiveOperationAllowed() or `prisma migrate reset` run below.
+// npm run db:reset:test normally sets MISSIONTHREAD_SEED_SCOPE=test via
+// scripts/with-destructive-auth.mjs before this script starts, but this
+// script does not trust that wrapper to have done so correctly — a wrapper
+// bug, or this file being invoked directly, could otherwise let an
+// irreversible `prisma migrate reset` run with the wrong scope inherited.
+// The rejection message reports only missing-vs-invalid, never the raw
+// value: a malformed environment variable could itself be a connection
+// string, a credential, or other sensitive text.
+if (!isTestSeedScope(process.env.MISSIONTHREAD_SEED_SCOPE)) {
+  const reason = classifySeedScopeError(process.env.MISSIONTHREAD_SEED_SCOPE);
+  console.error(
+    `Refusing test database reset: MISSIONTHREAD_SEED_SCOPE is ${reason}; expected exactly "test".`,
+  );
+  process.exit(1);
+}
 
 // Environment files live at the repo root (SPEC.md §17); load explicitly so
 // this script works when invoked directly, not just through npm/CI env vars.

@@ -4,7 +4,33 @@ import { config as loadEnv } from "dotenv";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import { hashPassword } from "../src/auth/password";
-import { checkDestructiveOperationAllowed, resolveSeedScopeTargets } from "../src/db-safety";
+import {
+  checkDestructiveOperationAllowed,
+  classifySeedScopeError,
+  resolveSeedConfiguration,
+  type ResolvedSeedScope,
+} from "../src/db-safety";
+
+// Checked before anything else in this module runs — before dotenv is
+// loaded, before DATABASE_URL is read, and before PrismaPg/PrismaClient are
+// constructed below. This function deletes every row in every table, so an
+// invalid or missing scope must fail before this process loads database
+// configuration or constructs the Prisma client, not merely before it
+// deletes anything. The rejection message reports only whether the scope
+// was missing or invalid, never its raw value — a malformed value could
+// itself be a connection string, a credential, or other sensitive text.
+const rawSeedConfiguration = resolveSeedConfiguration(process.env.MISSIONTHREAD_SEED_SCOPE);
+if (!rawSeedConfiguration) {
+  const reason = classifySeedScopeError(process.env.MISSIONTHREAD_SEED_SCOPE);
+  console.error(
+    `Refusing database seed: MISSIONTHREAD_SEED_SCOPE is ${reason}; expected "dev", "test", or "github-actions".`,
+  );
+  process.exit(1);
+}
+// Re-bound with an explicit non-nullable type: TypeScript's control-flow
+// narrowing above doesn't carry through into main()/clearExistingData(),
+// which close over this value but run later — see main()'s call site below.
+const seedConfiguration: ResolvedSeedScope = rawSeedConfiguration;
 
 // Environment files live at the repo root (SPEC.md §17); load explicitly so
 // this script works when invoked directly with `tsx prisma/seed.ts` from
@@ -36,7 +62,7 @@ const prisma = new PrismaClient({ adapter });
 // README.md as a local-development-only credential, never used in production.
 const DEMO_PASSWORD = "MissionThread-Demo-2026!";
 
-async function clearExistingData() {
+async function clearExistingData({ scope, approvedTargets }: ResolvedSeedScope) {
   // This function deletes every row in every table — it must know exactly
   // which database it's authorized to touch before it touches anything.
   // The scope is supplied explicitly via MISSIONTHREAD_SEED_SCOPE (set only
@@ -44,16 +70,12 @@ async function clearExistingData() {
   // inferred from DATABASE_URL: a scope-blind guard that accepted "any
   // approved target" would let a dev-scoped invocation accidentally clear
   // the test database (or vice versa) if DATABASE_URL were ever
-  // misconfigured, instead of failing closed on the mismatch.
-  const scope = process.env.MISSIONTHREAD_SEED_SCOPE;
-  const approvedTargets = resolveSeedScopeTargets(scope);
-  if (!approvedTargets) {
-    console.error(
-      `Refusing database seed: MISSIONTHREAD_SEED_SCOPE must be exactly one of "dev", "test", or "github-actions" (got ${JSON.stringify(scope ?? null)}).`,
-    );
-    process.exit(1);
-  }
-
+  // misconfigured, instead of failing closed on the mismatch. The
+  // ResolvedSeedScope pairing scope with approvedTargets is resolved once,
+  // at module startup (see top of file), and passed in here rather than
+  // re-resolved — this function only runs after that fail-first check has
+  // already passed, and the pairing makes it a type error to accidentally
+  // apply one scope's label with another scope's approved targets.
   const check = checkDestructiveOperationAllowed({
     operationName: `database seed (${scope} scope, clears existing data first)`,
     databaseUrl: process.env.DATABASE_URL,
@@ -731,7 +753,7 @@ async function seedEvents(programManagerId: string) {
 
 async function main() {
   console.log("Clearing existing data...");
-  await clearExistingData();
+  await clearExistingData(seedConfiguration);
 
   console.log("Seeding users...");
   const { programManager } = await seedUsers();

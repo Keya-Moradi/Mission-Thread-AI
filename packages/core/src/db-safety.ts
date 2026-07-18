@@ -154,23 +154,77 @@ export const SEED_SCOPES = ["dev", "test", "github-actions"] as const;
 export type SeedScope = (typeof SEED_SCOPES)[number];
 
 /**
- * Maps a seed scope to the exact target tuples that scope may touch, or
- * null for a missing/unrecognized scope. seed.ts must treat null as a hard
- * failure, not fall back to a broader default — there is no default scope.
+ * A validated seed scope paired with the exact target tuples it may touch.
+ * Returned as a single object, rather than the two values separately, so a
+ * caller can never accidentally combine a validated scope label with a
+ * different scope's target list (or an undefined scope with any targets) —
+ * the two can only ever travel together.
+ */
+export interface ResolvedSeedScope {
+  scope: SeedScope;
+  approvedTargets: readonly ApprovedDatabaseTarget[];
+}
+
+/**
+ * The single source of truth mapping a seed scope to the exact target
+ * tuples that scope may touch, or null for a missing/unrecognized scope.
+ * Callers must treat null as a hard failure, not fall back to a broader
+ * default — there is no default scope. seed.ts uses this directly via its
+ * paired { scope, approvedTargets } result; resolveSeedScopeTargets below
+ * is a thin wrapper for callers (mainly tests) that only need the target
+ * list, not the scope label alongside it.
+ */
+export function resolveSeedConfiguration(scope: string | undefined): ResolvedSeedScope | null {
+  switch (scope) {
+    case "dev":
+      return { scope, approvedTargets: LOCAL_DEV_TARGETS };
+    case "test":
+      return { scope, approvedTargets: LOCAL_TEST_TARGETS };
+    case "github-actions":
+      return { scope, approvedTargets: GITHUB_ACTIONS_TEST_TARGETS };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Target list only, for callers that don't need the paired scope label —
+ * see resolveSeedConfiguration, the single source of truth this derives
+ * from. Kept because packages/core/src/db-safety.test.ts uses this directly
+ * throughout its target-tuple tests, where re-deriving a ResolvedSeedScope
+ * just to discard its `scope` field would add nothing.
  */
 export function resolveSeedScopeTargets(
   scope: string | undefined,
 ): readonly ApprovedDatabaseTarget[] | null {
-  switch (scope) {
-    case "dev":
-      return LOCAL_DEV_TARGETS;
-    case "test":
-      return LOCAL_TEST_TARGETS;
-    case "github-actions":
-      return GITHUB_ACTIONS_TEST_TARGETS;
-    default:
-      return null;
-  }
+  return resolveSeedConfiguration(scope)?.approvedTargets ?? null;
+}
+
+/**
+ * Distinguishes an unset/empty MISSIONTHREAD_SEED_SCOPE from one that was
+ * set but didn't match an expected value, without exposing what the value
+ * actually was. A rejected scope is, by definition, unexpected input — it
+ * could hold a connection string, a credential, or other sensitive text
+ * pasted into the wrong environment variable — so callers must never
+ * interpolate the raw value into a message that might be logged.
+ */
+export function classifySeedScopeError(scope: string | undefined): "missing" | "invalid" {
+  return scope ? "invalid" : "missing";
+}
+
+/**
+ * True only when the seed scope is exactly "test" — the sole scope
+ * scripts/reset-test-db.ts is ever allowed to proceed with. That script
+ * doesn't fully trust scripts/with-destructive-auth.mjs (the wrapper that
+ * normally supplies this) to have set it correctly before running
+ * `prisma migrate reset`; a wrapper bug or a direct invocation bypassing
+ * it could otherwise let an irreversible reset run against whatever
+ * MISSIONTHREAD_SEED_SCOPE happened to be inherited. Extracted as its own
+ * function, rather than an inline `=== "test"` check, so this specific
+ * invariant has a direct unit test independent of resolveSeedScopeTargets.
+ */
+export function isTestSeedScope(scope: string | undefined): scope is "test" {
+  return scope === "test";
 }
 
 export type DestructiveOperationFailureReason =

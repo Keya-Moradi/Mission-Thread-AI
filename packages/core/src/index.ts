@@ -14,13 +14,17 @@ export {
   LOCAL_TEST_TARGETS,
   SEED_SCOPES,
   checkDestructiveOperationAllowed,
+  classifySeedScopeError,
   findApprovedDatabaseTarget,
   isTestDatabaseName,
+  isTestSeedScope,
+  resolveSeedConfiguration,
   resolveSeedScopeTargets,
   sanitizeDatabaseUrl,
   type ApprovedDatabaseTarget,
   type DestructiveOperationCheck,
   type DestructiveOperationFailureReason,
+  type ResolvedSeedScope,
   type SeedScope,
 } from "./db-safety";
 export type { PrismaClient, User } from "@prisma/client";

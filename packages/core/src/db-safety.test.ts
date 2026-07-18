@@ -4,9 +4,12 @@ import {
   LOCAL_DEV_TARGETS,
   LOCAL_TEST_TARGETS,
   checkDestructiveOperationAllowed,
+  classifySeedScopeError,
   extractDatabaseName,
   findApprovedDatabaseTarget,
   isTestDatabaseName,
+  isTestSeedScope,
+  resolveSeedConfiguration,
   resolveSeedScopeTargets,
   sanitizeDatabaseUrl,
 } from "./db-safety";
@@ -213,11 +216,28 @@ describe("resolveSeedScopeTargets — explicit seed scope, never inferred from D
     expect(resolveSeedScopeTargets(undefined)).toBeNull();
   });
 
-  it("an unknown scope resolves to null", () => {
-    expect(resolveSeedScopeTargets("production")).toBeNull();
+  it("an empty scope resolves to null", () => {
     expect(resolveSeedScopeTargets("")).toBeNull();
-    expect(resolveSeedScopeTargets("Dev")).toBeNull(); // case-sensitive: not a silent alias for "dev"
   });
+
+  it("an arbitrary/unknown scope resolves to null", () => {
+    expect(resolveSeedScopeTargets("production")).toBeNull();
+    expect(resolveSeedScopeTargets("staging")).toBeNull();
+  });
+
+  it.each(["Dev", "DEV", "Test", "TEST", "Github-Actions", "GITHUB-ACTIONS"])(
+    "the uppercase/mixed-case variant %j resolves to null (case-sensitive, not a silent alias)",
+    (value) => {
+      expect(resolveSeedScopeTargets(value)).toBeNull();
+    },
+  );
+
+  it.each([" dev", "dev ", " test", "test ", " github-actions", "github-actions "])(
+    "the whitespace variant %j resolves to null",
+    (value) => {
+      expect(resolveSeedScopeTargets(value)).toBeNull();
+    },
+  );
 
   it("dev scope's targets cannot seed the test database", () => {
     const testTarget = sanitizeDatabaseUrl(urlFor("localhost", "55432", "missionthread_test"))!;
@@ -253,6 +273,130 @@ describe("resolveSeedScopeTargets — explicit seed scope, never inferred from D
         GITHUB_ACTIONS: "true",
       }),
     ).toBeNull();
+  });
+});
+
+describe("isTestSeedScope — the sole check scripts/reset-test-db.ts trusts before migrate reset", () => {
+  it('[positive] accepts exactly "test"', () => {
+    expect(isTestSeedScope("test")).toBe(true);
+  });
+
+  it("[negative] rejects a missing scope", () => {
+    expect(isTestSeedScope(undefined)).toBe(false);
+  });
+
+  it("[negative] rejects other valid scopes", () => {
+    expect(isTestSeedScope("dev")).toBe(false);
+    expect(isTestSeedScope("github-actions")).toBe(false);
+  });
+
+  it.each(["Test", "TEST", " test", "test ", " Test "])(
+    "[negative] rejects the case/whitespace variant %j",
+    (value) => {
+      expect(isTestSeedScope(value)).toBe(false);
+    },
+  );
+
+  it("[negative] rejects arbitrary values", () => {
+    expect(isTestSeedScope("production")).toBe(false);
+    expect(isTestSeedScope("")).toBe(false);
+  });
+});
+
+describe("resolveSeedConfiguration — pairs a validated scope with its target list", () => {
+  it("[positive] dev resolves to { scope: 'dev', approvedTargets: LOCAL_DEV_TARGETS }", () => {
+    expect(resolveSeedConfiguration("dev")).toEqual({
+      scope: "dev",
+      approvedTargets: LOCAL_DEV_TARGETS,
+    });
+  });
+
+  it("[positive] test resolves to { scope: 'test', approvedTargets: LOCAL_TEST_TARGETS }", () => {
+    expect(resolveSeedConfiguration("test")).toEqual({
+      scope: "test",
+      approvedTargets: LOCAL_TEST_TARGETS,
+    });
+  });
+
+  it("[positive] github-actions resolves to { scope: 'github-actions', approvedTargets: GITHUB_ACTIONS_TEST_TARGETS }", () => {
+    expect(resolveSeedConfiguration("github-actions")).toEqual({
+      scope: "github-actions",
+      approvedTargets: GITHUB_ACTIONS_TEST_TARGETS,
+    });
+  });
+
+  it("[negative] a missing scope resolves to null", () => {
+    expect(resolveSeedConfiguration(undefined)).toBeNull();
+  });
+
+  it("[negative] an empty scope resolves to null", () => {
+    expect(resolveSeedConfiguration("")).toBeNull();
+  });
+
+  it("[negative] an arbitrary/unknown scope resolves to null", () => {
+    expect(resolveSeedConfiguration("production")).toBeNull();
+  });
+
+  it.each(["Dev", "DEV", "Test", "TEST", " dev", "test "])(
+    "[negative] the case/whitespace variant %j resolves to null",
+    (value) => {
+      expect(resolveSeedConfiguration(value)).toBeNull();
+    },
+  );
+
+  it("stays consistent with resolveSeedScopeTargets, its thin single-value wrapper", () => {
+    for (const scope of ["dev", "test", "github-actions"] as const) {
+      expect(resolveSeedConfiguration(scope)!.approvedTargets).toBe(resolveSeedScopeTargets(scope));
+    }
+  });
+});
+
+describe("classifySeedScopeError — sanitized missing-vs-invalid classification, never the raw value", () => {
+  it('[missing] undefined classifies as "missing"', () => {
+    expect(classifySeedScopeError(undefined)).toBe("missing");
+  });
+
+  it('[missing] empty string classifies as "missing"', () => {
+    expect(classifySeedScopeError("")).toBe("missing");
+  });
+
+  it('[invalid] an arbitrary value classifies as "invalid"', () => {
+    expect(classifySeedScopeError("production")).toBe("invalid");
+  });
+
+  it.each(["Dev", "DEV", "Test", "TEST", " dev", "test ", "dev,test"])(
+    '[invalid] the case/whitespace/malformed variant %j classifies as "invalid"',
+    (value) => {
+      expect(classifySeedScopeError(value)).toBe("invalid");
+    },
+  );
+
+  it("never echoes a secret-like rejected value back in its result or in the message built from it", () => {
+    // Simulates MISSIONTHREAD_SEED_SCOPE being accidentally set to a
+    // connection string — exactly the kind of sensitive value a rejection
+    // message must never interpolate. This URL is never connected to. The
+    // credential/host/db-name components are deliberately distinctive
+    // (not generic English words like "database") so this assertion can't
+    // pass by accident if this file's own wording happens to share a word
+    // with the secret.
+    const secretLikeValue =
+      "postgresql://svc_user:hunter2_secret@internal-prod.example.invalid/missionthread_shadow_prod";
+    const reason = classifySeedScopeError(secretLikeValue);
+    expect(reason).toBe("invalid");
+
+    // Mirrors the exact message templates seed.ts and reset-test-db.ts
+    // build from `reason` — proving the constructed message is safe too,
+    // not just the classification result in isolation.
+    const seedMessage = `Refusing database seed: MISSIONTHREAD_SEED_SCOPE is ${reason}; expected "dev", "test", or "github-actions".`;
+    const resetMessage = `Refusing test database reset: MISSIONTHREAD_SEED_SCOPE is ${reason}; expected exactly "test".`;
+
+    for (const message of [seedMessage, resetMessage]) {
+      expect(message).not.toContain("svc_user");
+      expect(message).not.toContain("hunter2_secret");
+      expect(message).not.toContain("internal-prod.example.invalid");
+      expect(message).not.toContain("missionthread_shadow_prod");
+      expect(message).not.toContain(secretLikeValue);
+    }
   });
 });
 
