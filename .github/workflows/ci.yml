@@ -76,14 +76,17 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
-      - name: Unit tests
-        run: npm run test
-
       - name: Migrate CI test database
         run: npm run db:migrate:deploy --workspace @missionthread/core
 
       - name: Seed CI test database
         run: npm run db:seed:github-actions:internal
+
+      # Phase 2 added database-backed tests (packages/core/src/analysis) —
+      # they need the CI database migrated and seeded first, which unit
+      # tests alone previously didn't (see docs/DECISIONS.md).
+      - name: Unit and integration tests
+        run: npm run test
 
       - name: Production build
         run: npm run build

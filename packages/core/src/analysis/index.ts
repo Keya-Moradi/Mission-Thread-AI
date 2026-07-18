@@ -41,5 +41,10 @@ export type { RiskScoreResult, RiskScoreCalculation, RiskBand } from "./risk";
 export { calculateReadinessScore } from "./readiness";
 export type { ReadinessScoreResult, ReadinessFactorResult } from "./readiness";
 
-export { buildAnalysisEvidence } from "./evidence";
-export type { AnalysisEvidence, EvidenceItem } from "./evidence";
+export {
+  buildAnalysisEvidence,
+  applyEvidenceBounds,
+  truncateText,
+  EVIDENCE_LIMITS,
+} from "./evidence";
+export type { AnalysisEvidence, EvidenceItem, EventFacts, BoundedEvidence } from "./evidence";
