@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: missionthread-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: missionthread
+      POSTGRES_PASSWORD: missionthread_local_dev_password
+      POSTGRES_DB: missionthread_dev
+    ports:
+      # Host 55432 -> container 5432. A local Postgres may already be running
+      # on the standard 5432; see docs/DECISIONS.md (2026-07-17).
+      - "55432:5432"
+    volumes:
+      - missionthread_pgdata:/var/lib/postgresql/data
+      - ./docker/init-test-db.sh:/docker-entrypoint-initdb.d/init-test-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U missionthread -d missionthread_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  missionthread_pgdata:

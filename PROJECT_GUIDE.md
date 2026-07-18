@@ -1,4 +1,4 @@
-# MissionThread AI — Claude Instructions
+# MissionThread AI — Project Guide
 
 Read this file and `docs/SPEC.md` before planning or editing.
 

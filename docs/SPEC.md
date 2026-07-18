@@ -2,7 +2,7 @@
 
 ## 0. Execution gate
 
-- First run: Phase 0 only, in Claude Code plan mode.
+- First run: Phase 0 only, in plan mode.
 - Present the plan, then STOP.
 - Each `continue` authorizes exactly one phase.
 - Update `docs/TASKS.md` and `docs/DECISIONS.md` after every phase.
@@ -197,17 +197,17 @@ React Flow is lower priority than the event → analysis → approval → audit 
 Implement in `packages/core`:
 
 ```ts
-getImpactedRequirements(componentId)
-getImpactedMilestones(componentId)
-getDependencyChain(milestoneId)
-getVerificationGaps(requirementIds)
-getRelatedDefects(requirementIds)
-calculateBudgetVariance(programId)
-calculateBudgetExposure(eventId)
-calculateScheduleExposure(eventId)
-calculateRiskScore(riskId)
-calculateReadinessScore(programId)
-buildAnalysisEvidence(eventId)
+getImpactedRequirements(componentId);
+getImpactedMilestones(componentId);
+getDependencyChain(milestoneId);
+getVerificationGaps(requirementIds);
+getRelatedDefects(requirementIds);
+calculateBudgetVariance(programId);
+calculateBudgetExposure(eventId);
+calculateScheduleExposure(eventId);
+calculateRiskScore(riskId);
+calculateReadinessScore(programId);
+buildAnalysisEvidence(eventId);
 ```
 
 Rules:
@@ -463,7 +463,7 @@ Any cut requires user approval and documentation in `docs/DECISIONS.md`, `docs/T
 
 ### Phase 0 — Plan only
 
-In Claude Code plan mode:
+In plan mode:
 
 - inspect repository
 - propose workspace and architecture

@@ -1,0 +1,17 @@
+{
+  "name": "@missionthread/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only MCP server exposing MissionThread AI program data. Built in Phase 7.",
+  "main": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@missionthread/core": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5"
+  }
+}

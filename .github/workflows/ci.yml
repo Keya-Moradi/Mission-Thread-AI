@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  AI_MODE: mock
+  # Placeholder connection string: prisma validate/generate only need a
+  # syntactically valid DATABASE_URL, not a reachable database. Integration
+  # tests against a real, dedicated CI database are added in Phase 8.
+  DATABASE_URL: "postgresql://ci:ci@localhost:5432/missionthread_ci"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate Prisma schema
+        run: npm run db:validate --workspace @missionthread/core
+
+      - name: Generate Prisma client
+        run: npm run db:generate --workspace @missionthread/core
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test
+
+      - name: Production build
+        run: npm run build

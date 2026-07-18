@@ -1,0 +1,499 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------- Enums ----------
+// SPEC.md §6: role, status, risk, test outcome, severity, event type, confidence,
+// analysis status, mitigation status, approval state, proposed-change type,
+// audit actor, and audit action. "Status" is modeled per-entity below since each
+// entity's valid states differ (Prisma enums are not shared across value sets).
+
+enum Role {
+  PROGRAM_MANAGER
+  ENGINEERING_LEAD
+  EXECUTIVE_VIEWER
+}
+
+enum MilestoneStatus {
+  NOT_STARTED
+  ON_TRACK
+  AT_RISK
+  DELAYED
+  COMPLETE
+}
+
+enum RiskSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum RiskStatus {
+  OPEN
+  MITIGATING
+  CLOSED
+}
+
+enum TestOutcome {
+  PASSED
+  FAILED
+  BLOCKED
+  NOT_RUN
+}
+
+enum DefectSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum DefectStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum EventType {
+  SUPPLIER_DELAY
+  GENERAL_UPDATE
+}
+
+enum ConfidenceLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum AnalysisStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+enum MitigationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REVISION_REQUESTED
+}
+
+enum ApprovalState {
+  APPROVED
+  REJECTED
+  REVISION_REQUESTED
+}
+
+enum ProposedChangeType {
+  MILESTONE_DATE
+  RISK_UPDATE
+  BUDGET_UPDATE
+  NEW_ACTION
+}
+
+enum ProposedChangeStatus {
+  PENDING
+  APPLIED
+}
+
+enum AuditActor {
+  USER
+  SYSTEM
+  AI
+}
+
+enum AuditAction {
+  EVENT_RECORDED
+  ANALYSIS_STARTED
+  ANALYSIS_SUCCEEDED
+  ANALYSIS_FAILED
+  DECISION_RECORDED
+  CHANGES_APPLIED
+}
+
+// Allowlisted record kinds for evidence citations, proposed-change targets, and
+// audit targets. Keeps AI citations and change previews restricted to real,
+// known record types instead of arbitrary strings.
+enum RecordType {
+  PROGRAM
+  COMPONENT
+  REQUIREMENT
+  MILESTONE
+  RISK
+  SUPPLIER
+  TEST_CASE
+  DEFECT
+  BUDGET_ITEM
+  PROGRAM_EVENT
+}
+
+// ---------- Users ----------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  role         Role
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  createdEvents ProgramEvent[] @relation("EventCreatedBy")
+  decisions     Decision[]     @relation("DecisionActor")
+  auditEvents   AuditEvent[]   @relation("AuditActorUser")
+
+  @@index([role])
+}
+
+// ---------- Program reference data ----------
+// Seeded reference records keep fixed, human-readable IDs (see prisma/seed.ts);
+// they are not @default(cuid()) so seed data stays deterministic across resets.
+
+model Program {
+  id          String   @id
+  name        String
+  description String
+  createdAt   DateTime @default(now())
+
+  components   Component[]
+  requirements Requirement[]
+  milestones   Milestone[]
+  dependencies Dependency[]
+  risks        Risk[]
+  suppliers    Supplier[]
+  testCases    TestCase[]
+  defects      Defect[]
+  budgetItems  BudgetItem[]
+  events       ProgramEvent[]
+}
+
+model Component {
+  id          String @id
+  programId   String
+  name        String
+  subsystem   String
+  description String
+
+  program      Program                 @relation(fields: [programId], references: [id])
+  requirements RequirementComponent[]
+  milestones   Milestone[]
+  risks        Risk[]
+  budgetItems  BudgetItem[]
+  events       ProgramEvent[]
+
+  @@index([programId])
+}
+
+model Requirement {
+  id          String @id
+  programId   String
+  title       String
+  description String
+  priority    String
+  status      String
+
+  program    Program                 @relation(fields: [programId], references: [id])
+  components RequirementComponent[]
+  testCases  TestRequirement[]
+
+  @@index([programId])
+}
+
+// Many-to-many: which components a requirement is verified against.
+model RequirementComponent {
+  requirementId String
+  componentId   String
+
+  requirement Requirement @relation(fields: [requirementId], references: [id])
+  component   Component   @relation(fields: [componentId], references: [id])
+
+  @@id([requirementId, componentId])
+  @@index([componentId, requirementId])
+}
+
+model Milestone {
+  id          String          @id
+  programId   String
+  componentId String
+  name        String
+  plannedDate DateTime
+  currentDate DateTime
+  status      MilestoneStatus
+
+  program    Program      @relation(fields: [programId], references: [id])
+  component  Component    @relation(fields: [componentId], references: [id])
+  dependents Dependency[] @relation("DependencyFrom")
+  dependsOn  Dependency[] @relation("DependencyTo")
+
+  @@index([programId])
+  @@index([componentId])
+}
+
+// Directed DAG edges between milestones (from finishes before to starts).
+// getDependencyChain() traverses these; seed/service code must guard against
+// cycles and duplicate edges since the DB does not enforce acyclicity itself.
+model Dependency {
+  id              String @id @default(cuid())
+  programId       String
+  fromMilestoneId String
+  toMilestoneId   String
+
+  program       Program   @relation(fields: [programId], references: [id])
+  fromMilestone Milestone @relation("DependencyFrom", fields: [fromMilestoneId], references: [id])
+  toMilestone   Milestone @relation("DependencyTo", fields: [toMilestoneId], references: [id])
+
+  @@unique([fromMilestoneId, toMilestoneId])
+  @@index([programId])
+  @@index([toMilestoneId])
+}
+
+model Risk {
+  id          String       @id
+  programId   String
+  componentId String?
+  title       String
+  description String
+  severity    RiskSeverity
+  probability Int
+  impact      Int
+  status      RiskStatus
+
+  program   Program    @relation(fields: [programId], references: [id])
+  component Component? @relation(fields: [componentId], references: [id])
+
+  @@index([programId])
+}
+
+model Supplier {
+  id      String @id
+  programId String
+  name    String
+  contact String
+
+  program Program        @relation(fields: [programId], references: [id])
+  events  ProgramEvent[]
+
+  @@index([programId])
+}
+
+// TestResult merged into TestCase (see docs/DECISIONS.md, 2026-07-17): the MVP
+// only needs the current outcome per test, not a run-history table.
+model TestCase {
+  id          String      @id
+  programId   String
+  name        String
+  description String
+  outcome     TestOutcome
+  lastRunAt   DateTime?
+  notes       String?
+
+  program      Program           @relation(fields: [programId], references: [id])
+  requirements TestRequirement[]
+  defects      Defect[]
+
+  @@index([programId])
+  @@index([outcome])
+}
+
+// Many-to-many: which requirements a test case verifies.
+model TestRequirement {
+  testCaseId    String
+  requirementId String
+
+  testCase    TestCase    @relation(fields: [testCaseId], references: [id])
+  requirement Requirement @relation(fields: [requirementId], references: [id])
+
+  @@id([testCaseId, requirementId])
+  @@index([requirementId, testCaseId])
+}
+
+model Defect {
+  id                String         @id
+  programId         String
+  title             String
+  description       String
+  severity          DefectSeverity
+  status            DefectStatus
+  relatedTestCaseId String?
+
+  program         Program   @relation(fields: [programId], references: [id])
+  relatedTestCase TestCase? @relation(fields: [relatedTestCaseId], references: [id])
+
+  @@index([programId])
+}
+
+model BudgetItem {
+  id            String  @id
+  programId     String
+  componentId   String?
+  category      String
+  description   String
+  plannedAmount Decimal @db.Decimal(12, 2)
+  actualAmount  Decimal @db.Decimal(12, 2)
+  currency      String  @default("USD")
+
+  program   Program    @relation(fields: [programId], references: [id])
+  component Component? @relation(fields: [componentId], references: [id])
+
+  @@index([programId])
+}
+
+// ---------- Event -> analysis -> approval -> audit spine ----------
+
+// SupplierUpdate merged into ProgramEvent (see docs/DECISIONS.md, 2026-07-17):
+// the MVP exercises a single event type, so the trigger record and its
+// supplier-specific fields live together instead of a 1:1 join.
+model ProgramEvent {
+  id           String           @id
+  programId    String
+  eventType    EventType
+  componentId  String?
+  supplierId   String?
+  originalDate DateTime?
+  revisedDate  DateTime?
+  delayDays    Int?
+  reason       String?
+  confidence   ConfidenceLevel?
+  quantity     Int?
+  rawNotes     String?
+  createdById  String
+  createdAt    DateTime         @default(now())
+
+  program   Program          @relation(fields: [programId], references: [id])
+  component Component?       @relation(fields: [componentId], references: [id])
+  supplier  Supplier?        @relation(fields: [supplierId], references: [id])
+  createdBy User             @relation("EventCreatedBy", fields: [createdById], references: [id])
+  analyses  ImpactAnalysis[]
+
+  @@index([programId])
+  @@index([eventType])
+}
+
+model ImpactAnalysis {
+  id                   String            @id @default(cuid())
+  programEventId       String
+  traceId              String            @unique
+  status               AnalysisStatus
+  aiMode               String
+  provider             String?
+  model                String?
+  attempt              Int               @default(1)
+  executiveSummary     String?
+  missionImpact        String?
+  scheduleExposureDays Int?
+  budgetExposureAmount Decimal?          @db.Decimal(12, 2)
+  verificationGaps     Json?
+  assumptions          Json?
+  unknowns             Json?
+  confidence           ConfidenceLevel?
+  errorCategory        String?
+  durationMs           Int?
+  createdAt            DateTime          @default(now())
+
+  programEvent      ProgramEvent       @relation(fields: [programEventId], references: [id])
+  mitigationOptions MitigationOption[]
+  sourceReferences  SourceReference[]
+
+  @@index([programEventId])
+}
+
+// The bounded evidence allowlist an analysis was built from and/or cited.
+// "Affected requirement/milestone IDs" are derived by filtering these rows by
+// recordType rather than duplicating them into separate array columns.
+model SourceReference {
+  id               String     @id @default(cuid())
+  impactAnalysisId String
+  recordId         String
+  recordType       RecordType
+  summary          String
+  createdAt        DateTime   @default(now())
+
+  impactAnalysis ImpactAnalysis @relation(fields: [impactAnalysisId], references: [id])
+
+  @@index([impactAnalysisId])
+  @@index([recordType])
+}
+
+model MitigationOption {
+  id                String            @id @default(cuid())
+  impactAnalysisId  String
+  optionIndex       Int
+  title             String
+  description       String
+  tradeoffs         String
+  costImpact        Decimal?          @db.Decimal(12, 2)
+  scheduleImpact    Int?
+  isRecommended     Boolean           @default(false)
+  status            MitigationStatus  @default(PENDING)
+
+  impactAnalysis  ImpactAnalysis   @relation(fields: [impactAnalysisId], references: [id])
+  proposedChanges ProposedChange[]
+  decisions       Decision[]
+
+  @@unique([impactAnalysisId, optionIndex])
+  @@index([status])
+}
+
+model ProposedChange {
+  id                 String               @id @default(cuid())
+  mitigationOptionId String
+  changeType         ProposedChangeType
+  targetRecordId     String
+  targetRecordType   RecordType
+  oldValue           Json
+  newValue           Json
+  status             ProposedChangeStatus @default(PENDING)
+  appliedAt          DateTime?
+
+  mitigationOption MitigationOption @relation(fields: [mitigationOptionId], references: [id])
+
+  @@index([mitigationOptionId])
+  @@index([status])
+}
+
+// Approval merged into Decision (see docs/DECISIONS.md, 2026-07-17): one row
+// per approve/reject/request-revision action instead of two 1:1 tables.
+model Decision {
+  id                 String        @id @default(cuid())
+  mitigationOptionId String
+  actorUserId        String
+  verdict            ApprovalState
+  rationale          String?
+  traceId            String
+  createdAt          DateTime      @default(now())
+
+  mitigationOption MitigationOption @relation(fields: [mitigationOptionId], references: [id])
+  actor            User             @relation("DecisionActor", fields: [actorUserId], references: [id])
+  auditEvents      AuditEvent[]
+
+  @@index([mitigationOptionId])
+}
+
+// Append-only at the application level: packages/core exposes no update or
+// delete function for this model, and no route mutates an existing row.
+// This is not cryptographic immutability — see docs/THREAT_MODEL.md (Phase 6).
+model AuditEvent {
+  id               String      @id @default(cuid())
+  traceId          String
+  actorUserId      String?
+  actorType        AuditActor
+  action           AuditAction
+  targetRecordId   String?
+  targetRecordType RecordType?
+  decisionId       String?
+  beforeValue      Json?
+  afterValue       Json?
+  createdAt        DateTime    @default(now())
+
+  actorUser User?     @relation("AuditActorUser", fields: [actorUserId], references: [id])
+  decision  Decision? @relation(fields: [decisionId], references: [id])
+
+  @@index([createdAt])
+  @@index([traceId])
+  @@index([action])
+}
