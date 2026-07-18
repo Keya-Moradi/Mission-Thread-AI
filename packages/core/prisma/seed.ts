@@ -4,6 +4,11 @@ import { config as loadEnv } from "dotenv";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import { hashPassword } from "../src/auth/password";
+import {
+  APPROVED_DEV_DATABASE_NAMES,
+  APPROVED_TEST_DATABASE_NAMES,
+  checkDestructiveOperationAllowed,
+} from "../src/db-safety";
 
 // Environment files live at the repo root (SPEC.md §17); load explicitly so
 // this script works when invoked directly with `tsx prisma/seed.ts` from
@@ -17,6 +22,8 @@ import {
   COMPONENT_IDS,
   DEFECT_IDS,
   DEMO_USER_EMAILS,
+  DEMO_USER_IDS,
+  DEPENDENCY_IDS,
   EVENT_IDS,
   MILESTONE_IDS,
   PROGRAM_ID,
@@ -34,6 +41,23 @@ const prisma = new PrismaClient({ adapter });
 const DEMO_PASSWORD = "MissionThread-Demo-2026!";
 
 async function clearExistingData() {
+  // This function deletes every row in every table — it must pass the same
+  // shared guard as the test-reset script before touching anything. This
+  // script is invoked both directly (`npm run db:seed`, dev database) and
+  // as a subprocess of reset-test-db.ts (test database), so both database
+  // names are accepted here; each specific caller already narrowed which
+  // database it actually points DATABASE_URL at.
+  const check = checkDestructiveOperationAllowed({
+    operationName: "database seed (clears existing data first)",
+    databaseUrl: process.env.DATABASE_URL,
+    approvedDatabaseNames: [...APPROVED_DEV_DATABASE_NAMES, ...APPROVED_TEST_DATABASE_NAMES],
+  });
+  if (!check.allowed) {
+    console.error(check.message);
+    process.exit(1);
+  }
+  console.log(check.message);
+
   await prisma.auditEvent.deleteMany();
   await prisma.decision.deleteMany();
   await prisma.proposedChange.deleteMany();
@@ -57,31 +81,44 @@ async function clearExistingData() {
 }
 
 async function seedUsers() {
-  const passwordHash = hashPassword(DEMO_PASSWORD);
+  // Each demo account gets its own hashPassword() call — and therefore its
+  // own random salt — even though they share the same demo password. A
+  // single shared hash would mean all three rows have an identical salt,
+  // which defeats the purpose of salting (one cracked hash reveals all
+  // three accounts' password at once) and isn't representative of how
+  // real user rows are ever created.
+  const [pmHash, leadHash, execHash] = await Promise.all([
+    hashPassword(DEMO_PASSWORD),
+    hashPassword(DEMO_PASSWORD),
+    hashPassword(DEMO_PASSWORD),
+  ]);
 
   const [programManager, engineeringLead, executiveViewer] = await Promise.all([
     prisma.user.create({
       data: {
+        id: DEMO_USER_IDS.programManager,
         email: DEMO_USER_EMAILS.programManager,
         name: "Jordan Ellis",
         role: "PROGRAM_MANAGER",
-        passwordHash,
+        passwordHash: pmHash,
       },
     }),
     prisma.user.create({
       data: {
+        id: DEMO_USER_IDS.engineeringLead,
         email: DEMO_USER_EMAILS.engineeringLead,
         name: "Priya Nair",
         role: "ENGINEERING_LEAD",
-        passwordHash,
+        passwordHash: leadHash,
       },
     }),
     prisma.user.create({
       data: {
+        id: DEMO_USER_IDS.executiveViewer,
         email: DEMO_USER_EMAILS.executiveViewer,
         name: "Sam Okafor",
         role: "EXECUTIVE_VIEWER",
-        passwordHash,
+        passwordHash: execHash,
       },
     }),
   ]);
@@ -371,9 +408,9 @@ async function seedDependencies() {
   ];
 
   await Promise.all(
-    edges.map(([fromMilestoneId, toMilestoneId]) =>
+    edges.map(([fromMilestoneId, toMilestoneId], index) =>
       prisma.dependency.create({
-        data: { programId: PROGRAM_ID, fromMilestoneId, toMilestoneId },
+        data: { id: DEPENDENCY_IDS[index], programId: PROGRAM_ID, fromMilestoneId, toMilestoneId },
       }),
     ),
   );

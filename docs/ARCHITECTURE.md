@@ -1,12 +1,19 @@
 # Architecture
 
+This document describes the **target** architecture established during
+Phase 0 planning. Sections are marked with what phase actually builds them;
+see [`docs/TASKS.md`](TASKS.md) for what exists in the repository right now.
+As of this writing, Phase 1 (workspaces, schema, seed data, auth, base
+shell) is complete; everything under "Request / data flow", "AI", and most
+of "Observability" below is still planned, not implemented.
+
 ## Workspaces
 
-- `apps/web` — Next.js App Router UI + route handlers/server actions.
-- `packages/core` — Zod schemas, deterministic services, Prisma schema/client, AI evidence builder + `LLMProvider`, mock fixtures, authorization policy helpers.
-- `packages/mcp-server` — Phase 7: read-only MCP tools reusing `packages/core`.
+- `apps/web` — Next.js App Router UI + route handlers/server actions. _(Phase 1: scaffold, auth, base shell. Phases 3–5: dashboard, event entry, analysis workspace, approval UI.)_
+- `packages/core` — Zod schemas, deterministic services, Prisma schema/client. _(Phase 1: schema, auth, seed, db-safety. Phase 2: deterministic services. Phase 4: AI evidence builder + `LLMProvider`, mock fixtures, prompts.)_
+- `packages/mcp-server` — Phase 7: read-only MCP tools reusing `packages/core`. _(Not started — placeholder package only.)_
 
-## Request / data flow
+## Request / data flow — planned (Phases 2–5), not yet implemented
 
 ```
 Program Manager submits supplier delay
@@ -24,26 +31,57 @@ Program Manager submits supplier delay
   -> DB transaction applies ProposedChanges (milestones/risks/budget/new actions) + AuditEvent
 ```
 
-## Domain model
+None of this flow is wired up yet. Today, `apps/web` only reads a handful of
+counts from Postgres for the dashboard shell — there is no event intake, no
+evidence builder, no AI call, and no approval or apply path.
 
-See `docs/DECISIONS.md` (2026-07-17 entries) for the approved 20-model Prisma set and the three merges applied to the `SPEC.md` §6 baseline (`TestResult`→`TestCase`, `SupplierUpdate`→`ProgramEvent`, `Approval`→`Decision`). Full schema is authored in Phase 1 at `packages/core/prisma/schema.prisma`.
+## Domain model — implemented (Phase 1)
 
-## Auth
+See `docs/DECISIONS.md` for the approved 20-model Prisma set, the three
+merges applied to the `SPEC.md` §6 baseline (`TestResult`→`TestCase`,
+`SupplierUpdate`→`ProgramEvent`, `Approval`→`Decision`), and the
+`RecordType` allowlist design. Schema lives at
+`packages/core/prisma/schema.prisma` and is migrated/seeded.
 
-Auth.js Credentials provider; `crypto.scrypt` password hashes; server-side session and role check on every mutation. UI role-gating is cosmetic only, never authoritative. Roles: Program Manager (full workflow), Engineering Lead (review + request revision), Executive Viewer (read-only).
+## Auth — implemented (Phase 1)
 
-## Persistence
+Auth.js Credentials provider; `crypto.scrypt` password hashes (validated
+strictly on verify — see `docs/DECISIONS.md`); JWT sessions; server-side
+session check via `auth()` in server layouts and pages. UI role-gating is
+cosmetic only, never authoritative. Roles: Program Manager (full workflow —
+not yet built), Engineering Lead (review + request revision — not yet
+built), Executive Viewer (read-only). Role-based **authorization on
+mutations** is planned for Phase 3+, once mutations exist.
 
-PostgreSQL via Prisma, single schema in `packages/core/prisma`. Dev and test databases are separate logical databases in the same local Docker Compose Postgres instance (host port `55432`, chosen to avoid colliding with a local Postgres already on 5432), selected via `DATABASE_URL` vs `TEST_DATABASE_URL`. The test reset script refuses to run unless the target database name contains a test marker.
+## Persistence — implemented (Phase 1)
 
-## AI
+PostgreSQL via Prisma, single schema in `packages/core/prisma`. Dev and
+test databases are separate logical databases in the same local Docker
+Compose Postgres instance (host port `55432`, chosen to avoid colliding
+with a local Postgres already on 5432), selected via `DATABASE_URL` vs
+`TEST_DATABASE_URL`. Every destructive operation (test reset, dev reseed)
+passes through the shared guard in `packages/core/src/db-safety.ts`.
 
-`LLMProvider` interface with a mock implementation (deterministic, no API key, used in CI/demo) and an optional live implementation (single provider adapter, server-only secret). Prompts live under `packages/core/src/ai/prompts`. The model receives only validated, bounded evidence — never raw database dumps — and untrusted text (e.g. supplier notes) is passed as clearly isolated data, never as instructions.
+## AI — planned (Phase 4), not yet implemented
 
-## Observability
+`LLMProvider` interface with a mock implementation (deterministic, no API
+key, used in CI/demo) and an optional live implementation (single provider
+adapter, server-only secret). Prompts will live under
+`packages/core/src/ai/prompts`. The model will receive only validated,
+bounded evidence — never raw database dumps — and untrusted text (e.g.
+supplier notes) will be passed as clearly isolated data, never as
+instructions. None of this exists in the codebase yet.
 
-Structured JSON logs; a trace ID is generated per analysis attempt (timestamp, user ID, program/event IDs, AI mode, provider/model, duration, attempt number, success/failure, safe error category). Secrets, credentials, tokens, full prompts, and full untrusted notes are never logged. Trace IDs are surfaced in the UI on analyses, failures, briefings, and audit entries.
+## Observability — partially implemented
+
+Structured JSON logging, per-analysis trace IDs, and UI trace-ID surfacing
+are planned for Phase 4+, once there are analysis attempts to log. Today,
+the only "observability" is Next's own dev/build console output and the
+safe (credential-free) messages returned by the destructive-operation
+guard.
 
 ## Deployment (MVP)
 
-Local Docker Compose only (Postgres service). No cloud infrastructure, no Kubernetes, no queues, no pgvector.
+Local Docker Compose only (Postgres service). No cloud infrastructure, no
+Kubernetes, no queues, no pgvector. See `README.md` for the current state
+of the application Dockerfile.

@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { config as loadEnv } from "dotenv";
-import { extractDatabaseName, isTestDatabaseName } from "../src/db-safety";
+import { APPROVED_TEST_DATABASE_NAMES, checkDestructiveOperationAllowed } from "../src/db-safety";
 
 // Environment files live at the repo root (SPEC.md §17); load explicitly so
 // this script works when invoked directly, not just through npm/CI env vars.
@@ -11,32 +11,26 @@ if (!process.env.TEST_DATABASE_URL) {
   loadEnv({ path: path.join(rootDir, ".env.test") });
 }
 
-// Refuses to run unless the target database name clearly contains a test
-// marker, so this can never accidentally be pointed at a dev/prod database.
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 
-if (!testDatabaseUrl) {
-  console.error("TEST_DATABASE_URL is not set. Refusing to reset any database.");
+// checkDestructiveOperationAllowed() is the single guard shared by this
+// script and the seed script's own clear-and-reseed step — see
+// packages/core/src/db-safety.ts. Its rejection messages are pre-sanitized
+// (host/port/database only), so it's always safe to print directly; never
+// interpolate testDatabaseUrl itself into a log line, which would leak the
+// local database credentials.
+const check = checkDestructiveOperationAllowed({
+  operationName: "test database reset",
+  databaseUrl: testDatabaseUrl,
+  approvedDatabaseNames: APPROVED_TEST_DATABASE_NAMES,
+});
+
+if (!check.allowed) {
+  console.error(check.message);
   process.exit(1);
 }
 
-let databaseName: string;
-try {
-  databaseName = extractDatabaseName(testDatabaseUrl);
-} catch {
-  console.error(`TEST_DATABASE_URL is not a valid connection string: ${testDatabaseUrl}`);
-  process.exit(1);
-}
-
-if (!isTestDatabaseName(databaseName)) {
-  console.error(
-    `Refusing to reset database "${databaseName}": its name does not contain "test". ` +
-      "Test reset must only ever target a database whose name clearly marks it as a test database.",
-  );
-  process.exit(1);
-}
-
-console.log(`Resetting test database "${databaseName}"...`);
+console.log(check.message);
 
 execFileSync("npx", ["prisma", "migrate", "reset", "--force", "--schema", "prisma/schema.prisma"], {
   stdio: "inherit",
@@ -47,6 +41,8 @@ console.log("Seeding test database...");
 
 // Explicit, rather than relying on Prisma's own post-reset auto-seed, so
 // this script's outcome doesn't depend on that behavior across CLI versions.
+// seed.ts runs its own copy of this same guard before it clears any data,
+// so this is not the only line of defense even if this script were bypassed.
 execFileSync("npx", ["tsx", "prisma/seed.ts"], {
   stdio: "inherit",
   env: { ...process.env, DATABASE_URL: testDatabaseUrl },

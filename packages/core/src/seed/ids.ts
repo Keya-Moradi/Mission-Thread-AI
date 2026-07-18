@@ -68,8 +68,28 @@ export const EVENT_IDS = {
   general: ["EVT-002", "EVT-003", "EVT-004"] as const,
 };
 
+// The DAG edges between milestones (see prisma/seed.ts seedDependencies).
+// Deterministic like every other seeded record, so a reset always produces
+// the same graph for screenshots, demos, and future dependency-chain tests.
+export const DEPENDENCY_IDS = [
+  "DEP-001",
+  "DEP-002",
+  "DEP-003",
+  "DEP-004",
+  "DEP-005",
+  "DEP-006",
+  "DEP-007",
+  "DEP-008",
+] as const;
+
 export const DEMO_USER_EMAILS = {
   programManager: "pm@missionthread.example",
   engineeringLead: "lead@missionthread.example",
   executiveViewer: "exec@missionthread.example",
+} as const;
+
+export const DEMO_USER_IDS = {
+  programManager: "USER-PM",
+  engineeringLead: "USER-ENG-LEAD",
+  executiveViewer: "USER-EXEC",
 } as const;

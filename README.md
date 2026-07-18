@@ -1,8 +1,5 @@
 ![MissionThread AI — Auditable AI-Assisted Program Digital Thread](docs/assets/missionthread-ai-banner.png)
 
-> The banner above is a reserved placeholder — see [`docs/assets/README.md`](docs/assets/README.md)
-> if the image isn't rendering yet.
-
 # MissionThread AI
 
 An auditable, AI-assisted program digital-thread platform for complex
@@ -271,6 +268,10 @@ Read [`PROJECT_GUIDE.md`](PROJECT_GUIDE.md) and
 phase-gate process, hard security/testing rules, and fixed architecture
 this project follows. Check [`docs/DECISIONS.md`](docs/DECISIONS.md) before
 re-deciding something that's already been settled.
+
+If your local editor or development tooling keeps its own config/state
+directory in the repo root, exclude it locally via `.git/info/exclude`
+rather than adding a tool-specific entry to the tracked `.gitignore`.
 
 ## License
 

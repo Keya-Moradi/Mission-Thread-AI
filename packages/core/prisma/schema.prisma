@@ -117,20 +117,33 @@ enum AuditAction {
   CHANGES_APPLIED
 }
 
-// Allowlisted record kinds for evidence citations, proposed-change targets, and
-// audit targets. Keeps AI citations and change previews restricted to real,
-// known record types instead of arbitrary strings.
+// Superset of every record kind that SourceReference, ProposedChange, or
+// AuditEvent might ever need to point at — domain data (PROGRAM through
+// PROGRAM_EVENT) plus the workflow entities an audit trail must itself be
+// able to reference (IMPACT_ANALYSIS through SOURCE_REFERENCE). Prisma has
+// no native way to constrain an enum to a *subset* per field, so each of
+// the three call sites is instead restricted at the application boundary by
+// the matching Zod schema in packages/core/src/record-types.ts
+// (evidenceRecordTypeSchema, proposedChangeTargetTypeSchema,
+// auditTargetTypeSchema) — see docs/DECISIONS.md for why one Prisma enum
+// plus three Zod allowlists was chosen over three separate Prisma enums.
 enum RecordType {
   PROGRAM
   COMPONENT
   REQUIREMENT
   MILESTONE
+  DEPENDENCY
   RISK
   SUPPLIER
   TEST_CASE
   DEFECT
   BUDGET_ITEM
   PROGRAM_EVENT
+  IMPACT_ANALYSIS
+  MITIGATION_OPTION
+  PROPOSED_CHANGE
+  DECISION
+  SOURCE_REFERENCE
 }
 
 // ---------- Users ----------
@@ -415,6 +428,10 @@ model SourceReference {
 
   impactAnalysis ImpactAnalysis @relation(fields: [impactAnalysisId], references: [id])
 
+  // The same record must never be cited twice as evidence for one analysis
+  // — a duplicate would let that record silently carry more weight in the
+  // bounded evidence set without actually adding new information.
+  @@unique([impactAnalysisId, recordType, recordId])
   @@index([impactAnalysisId])
   @@index([recordType])
 }
@@ -472,6 +489,7 @@ model Decision {
   auditEvents      AuditEvent[]
 
   @@index([mitigationOptionId])
+  @@index([traceId])
 }
 
 // Append-only at the application level: packages/core exposes no update or

@@ -11,6 +11,15 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: path.join(__dirname, "..", ".."),
   },
+  // Produces .next/standalone: a minimal, self-contained server bundle with
+  // only the node_modules this app actually needs (traced from its actual
+  // imports, including the @missionthread/core workspace package), instead
+  // of requiring the full monorepo node_modules tree in the runtime image.
+  output: "standalone",
+  // Output file tracing defaults to this app's own directory in a monorepo,
+  // which would miss the sibling @missionthread/core workspace package and
+  // the root lockfile. Point it at the monorepo root instead.
+  outputFileTracingRoot: path.join(__dirname, "..", ".."),
 };
 
 export default nextConfig;

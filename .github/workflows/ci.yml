@@ -5,16 +5,47 @@ on:
     branches: [main]
   pull_request:
 
+# Least-privilege default: this workflow only reads the repository, never
+# writes to it, opens PRs, or touches other GitHub resources.
+permissions:
+  contents: read
+
 env:
   AI_MODE: mock
-  # Placeholder connection string: prisma validate/generate only need a
-  # syntactically valid DATABASE_URL, not a reachable database. Integration
-  # tests against a real, dedicated CI database are added in Phase 8.
-  DATABASE_URL: "postgresql://ci:ci@localhost:5432/missionthread_ci"
+  # Deliberately non-secret — this only ever runs against the ephemeral
+  # Postgres service container below, never a real deployment.
+  AUTH_SECRET: "ci-only-secret-not-used-outside-this-workflow"
+  DATABASE_URL: "postgresql://missionthread:ci_test_password@localhost:5432/missionthread_test"
+  TEST_DATABASE_URL: "postgresql://missionthread:ci_test_password@localhost:5432/missionthread_test"
+  # The db-safety guard (packages/core/src/db-safety.ts) requires this
+  # explicit opt-in before it will let db:seed or db:reset:test touch data;
+  # it also independently checks that the target host and database name are
+  # on their approved allowlists, so this flag alone is not sufficient.
+  ALLOW_DESTRUCTIVE_DATABASE_OPERATION: "true"
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    # A dedicated CI database, isolated to this job's ephemeral container —
+    # never the developer's local dev/test database. The name
+    # "missionthread_test" is on APPROVED_TEST_DATABASE_NAMES, the same
+    # allowlist packages/core/src/db-safety.ts enforces locally.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: missionthread
+          POSTGRES_PASSWORD: ci_test_password
+          POSTGRES_DB: missionthread_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -46,5 +77,14 @@ jobs:
       - name: Unit tests
         run: npm run test
 
+      - name: Migrate CI test database
+        run: npm run db:migrate:deploy --workspace @missionthread/core
+
+      - name: Seed CI test database
+        run: npm run db:seed --workspace @missionthread/core
+
       - name: Production build
         run: npm run build
+
+      - name: Application smoke test
+        run: npm run smoke --workspace @missionthread/web
