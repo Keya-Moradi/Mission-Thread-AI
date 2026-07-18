@@ -15,10 +15,13 @@ program, customer, classified system, or export-controlled detail.
 
 ## Project status
 
-**Phase 1 of 8 (Foundation) — complete.** Workspaces, database schema,
-deterministic seed data, authentication, and a minimal application shell
-exist and are verified working end-to-end. The actual supplier-delay →
-analysis → approval → audit workflow has not been built yet; see
+**Phase 2 of 8 (Deterministic program logic) — complete.** Workspaces,
+database schema, deterministic seed data, authentication, a minimal
+application shell, and the full deterministic program-analysis service
+layer (`packages/core/src/analysis`) all exist and are verified working.
+The actual supplier-delay → analysis → approval → audit workflow is not
+wired into `apps/web` yet — no UI or route calls these services, and there
+is no AI layer, approval workflow, or audit trail yet; see
 [Phase roadmap](#phase-roadmap) and [Limitations](#limitations) below.
 
 Development follows a phase-gated process defined in
@@ -50,8 +53,9 @@ npm workspaces monorepo:
 
 ```
 apps/web              Next.js App Router UI, route handlers, server actions
-packages/core          Zod schemas, deterministic services, Prisma schema/client,
-                        AI evidence builder, mock fixtures (Phase 2+)
+packages/core          Zod schemas, deterministic services (Phase 2, done),
+                        Prisma schema/client, AI evidence builder, mock
+                        fixtures (Phase 4)
 packages/mcp-server     Read-only MCP server (placeholder — built in Phase 7)
 docs/                   Spec, plans, tasks, decisions, architecture, threat model
 evals/                  AI pipeline evaluations (Phase 6)
@@ -304,8 +308,12 @@ validated output with exactly one retry on failure). See `docs/SPEC.md` §9–10
 
 ## Limitations
 
-- **Single Phase 1 build.** No deterministic business logic, AI pipeline,
-  approval workflow, or audit trail exists yet.
+- **Phase 1–2 build.** The deterministic program-logic services (traceability,
+  dependency chains, verification gaps, related defects, schedule/budget
+  exposure, risk scoring, readiness scoring, bounded evidence assembly) exist
+  in `packages/core/src/analysis` and are fully unit-tested, but nothing in
+  `apps/web` calls them yet — no AI pipeline, approval workflow, or audit
+  trail exists yet either (Phase 3+).
 - **`next-auth` is on the v5 beta channel** (`5.0.0-beta.31`) — it's the
   version Auth.js's own docs currently recommend for the App Router, but
   it is pre-1.0 and could introduce breaking changes on upgrade.
@@ -326,17 +334,17 @@ validated output with exactly one retry on failure). See `docs/SPEC.md` §9–10
 
 ## Phase roadmap
 
-| Phase | Scope                                                                 |
-| ----- | --------------------------------------------------------------------- |
-| 0     | Plan (architecture, risks, planning docs) — done                      |
-| **1** | **Foundation (workspaces, schema, seed, auth, shell) — done**         |
-| 2     | Deterministic program logic (schedule/budget/risk/readiness services) |
-| 3     | Core workflow UI (dashboard, event entry, audit shell on real data)   |
-| 4     | AI impact analysis (LLMProvider, mock/live, structured output, retry) |
-| 5     | Approval and audit (state machine, apply preview, append-only audit)  |
-| 6     | Security and evals (threat model, prompt-injection defenses, evals)   |
-| 7     | Graph and MCP (React Flow thread view, read-only MCP server)          |
-| 8     | Delivery (full CI, Docker, browser tests, live eval, polish)          |
+| Phase | Scope                                                                                         |
+| ----- | --------------------------------------------------------------------------------------------- |
+| 0     | Plan (architecture, risks, planning docs) — done                                              |
+| **1** | **Foundation (workspaces, schema, seed, auth, shell) — done**                                 |
+| **2** | **Deterministic program logic (traceability/schedule/budget/risk/readiness/evidence) — done** |
+| 3     | Core workflow UI (dashboard, event entry, audit shell on real data)                           |
+| 4     | AI impact analysis (LLMProvider, mock/live, structured output, retry)                         |
+| 5     | Approval and audit (state machine, apply preview, append-only audit)                          |
+| 6     | Security and evals (threat model, prompt-injection defenses, evals)                           |
+| 7     | Graph and MCP (React Flow thread view, read-only MCP server)                                  |
+| 8     | Delivery (full CI, Docker, browser tests, live eval, polish)                                  |
 
 Full detail: [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
 

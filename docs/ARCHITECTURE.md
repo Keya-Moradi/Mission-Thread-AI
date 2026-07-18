@@ -4,21 +4,44 @@ This document describes the **target** architecture established during
 Phase 0 planning. Sections are marked with what phase actually builds them;
 see [`docs/TASKS.md`](TASKS.md) for what exists in the repository right now.
 As of this writing, Phase 1 (workspaces, schema, seed data, auth, base
-shell) is complete; everything under "Request / data flow", "AI", and most
-of "Observability" below is still planned, not implemented.
+shell) and Phase 2 (deterministic program-analysis services) are complete;
+everything under "AI", most of "Observability", and the UI/route-handler
+side of "Request / data flow" below is still planned, not implemented.
 
 ## Workspaces
 
 - `apps/web` — Next.js App Router UI + route handlers/server actions. _(Phase 1: scaffold, auth, base shell. Phases 3–5: dashboard, event entry, analysis workspace, approval UI.)_
-- `packages/core` — Zod schemas, deterministic services, Prisma schema/client. _(Phase 1: schema, auth, seed, db-safety. Phase 2: deterministic services. Phase 4: AI evidence builder + `LLMProvider`, mock fixtures, prompts.)_
+- `packages/core` — Zod schemas, deterministic services, Prisma schema/client. _(Phase 1: schema, auth, seed, db-safety. Phase 2: deterministic services — done. Phase 4: AI evidence builder + `LLMProvider`, mock fixtures, prompts.)_
 - `packages/mcp-server` — Phase 7: read-only MCP tools reusing `packages/core`. _(Not started — placeholder package only.)_
 
-## Request / data flow — planned (Phases 2–5), not yet implemented
+## Deterministic program-analysis services — implemented (Phase 2)
+
+`packages/core/src/analysis/` implements every function `SPEC.md` §8 requires, read-only and with no AI dependency:
+
+```text
+getImpactedRequirements(componentId)    traceability.ts
+getImpactedMilestones(componentId)      traceability.ts
+getDependencyChain(milestoneId)         dependencies.ts
+getVerificationGaps(requirementIds)     verification.ts
+getRelatedDefects(requirementIds)       defects.ts
+calculateBudgetVariance(programId)      budget.ts
+calculateBudgetExposure(eventId)        budget.ts
+calculateScheduleExposure(eventId)      schedule.ts
+calculateRiskScore(riskId)              risk.ts
+calculateReadinessScore(programId)      readiness.ts
+buildAnalysisEvidence(eventId)          evidence.ts
+```
+
+Every function returns a `ServiceResult<T>` (`{ ok: true, data } | { ok: false, error }`) instead of throwing for expected failures (missing record, invalid input) — see `docs/DECISIONS.md` for the full error-strategy, dependency-traversal-direction, schedule/budget/risk-formula, and evidence-bounding decisions, all documented before implementation. Pure calculation cores (dependency-graph traversal, budget decimal arithmetic, risk-score/band mapping, UTC date-difference math, verification-gap classification, defect grouping) are separated from their Prisma-backed wrappers and unit-tested independently of the database; the wrappers themselves are tested against the dedicated `missionthread_test` database's deterministic seed fixtures (`packages/core/src/test/setup-env.ts` force-loads and verifies `.env.test`'s `DATABASE_URL` before any test file runs, so these tests can never accidentally hit `missionthread_dev`).
+
+None of this is called from `apps/web` yet — Phase 3 wires a dashboard, event entry, and audit shell onto real data; Phase 4 is what actually calls `buildAnalysisEvidence()` from an event-intake route and feeds its output to an `LLMProvider`.
+
+## Request / data flow — the AI/approval/apply portion is planned (Phases 3–5), not yet implemented
 
 ```
 Program Manager submits supplier delay
   -> apps/web: POST /programs/edgelink-x/events (Zod-validated, server-side auth check)
-  -> packages/core: buildAnalysisEvidence(eventId)
+  -> packages/core: buildAnalysisEvidence(eventId)              [Phase 2 — done]
        - getImpactedRequirements / getImpactedMilestones / getDependencyChain
        - getVerificationGaps / getRelatedDefects
        - calculateScheduleExposure / calculateBudgetExposure
@@ -31,9 +54,10 @@ Program Manager submits supplier delay
   -> DB transaction applies ProposedChanges (milestones/risks/budget/new actions) + AuditEvent
 ```
 
-None of this flow is wired up yet. Today, `apps/web` only reads a handful of
-counts from Postgres for the dashboard shell — there is no event intake, no
-evidence builder, no AI call, and no approval or apply path.
+The event-intake route, the AI call, and the approval/apply path are not
+wired up yet. Today, `apps/web` only reads a handful of counts from
+Postgres for the dashboard shell — there is no event intake, no route that
+calls `buildAnalysisEvidence()`, no AI call, and no approval or apply path.
 
 ## Domain model — implemented (Phase 1)
 

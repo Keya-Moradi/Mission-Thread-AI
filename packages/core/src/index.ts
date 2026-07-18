@@ -29,3 +29,4 @@ export {
 } from "./db-safety";
 export type { PrismaClient, User } from "@prisma/client";
 export { Role } from "@prisma/client";
+export * from "./analysis";
