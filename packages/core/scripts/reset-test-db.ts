@@ -22,9 +22,10 @@ const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const check = checkDestructiveOperationAllowed({
   operationName: "test database reset",
   databaseUrl: testDatabaseUrl,
-  // Local-only tool: CI never runs this script (it migrates+seeds the CI
-  // Postgres service directly — see .github/workflows/ci.yml), so only the
-  // local test targets are ever appropriate here, never CI_TEST_TARGETS.
+  // Local-only tool: CI never runs this script (it migrates+seeds the
+  // GitHub Actions Postgres service directly via a dedicated internal
+  // command — see .github/workflows/ci.yml), so only the local test
+  // targets are ever appropriate here, never GITHUB_ACTIONS_TEST_TARGETS.
   approvedTargets: LOCAL_TEST_TARGETS,
 });
 
@@ -46,6 +47,9 @@ console.log("Seeding test database...");
 // this script's outcome doesn't depend on that behavior across CLI versions.
 // seed.ts runs its own copy of this same guard before it clears any data,
 // so this is not the only line of defense even if this script were bypassed.
+// MISSIONTHREAD_SEED_SCOPE is not set explicitly here — it's already
+// "test" in process.env, inherited from the wrapper that launched this
+// script (npm run db:reset:test), and the spread below passes it through.
 execFileSync("npx", ["tsx", "prisma/seed.ts"], {
   stdio: "inherit",
   env: { ...process.env, DATABASE_URL: testDatabaseUrl },

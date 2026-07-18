@@ -9,16 +9,19 @@ export {
 export * from "./seed/ids";
 export * from "./record-types";
 export {
-  CI_TEST_TARGETS,
+  GITHUB_ACTIONS_TEST_TARGETS,
   LOCAL_DEV_TARGETS,
   LOCAL_TEST_TARGETS,
+  SEED_SCOPES,
   checkDestructiveOperationAllowed,
   findApprovedDatabaseTarget,
   isTestDatabaseName,
+  resolveSeedScopeTargets,
   sanitizeDatabaseUrl,
   type ApprovedDatabaseTarget,
   type DestructiveOperationCheck,
   type DestructiveOperationFailureReason,
+  type SeedScope,
 } from "./db-safety";
 export type { PrismaClient, User } from "@prisma/client";
 export { Role } from "@prisma/client";

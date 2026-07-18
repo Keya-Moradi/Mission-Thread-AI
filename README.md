@@ -144,18 +144,21 @@ npm run db:migrate     # apply migrations to missionthread_dev
 ```
 
 **Seeding is destructive** — it clears every row in the target database
-before recreating the deterministic fixtures, so it requires the
-deliberately named command below rather than a plain `db:seed`:
+before recreating the deterministic fixtures, so it requires a
+deliberately named, target-specific command rather than a plain `db:seed`:
 
 ```bash
-npm run db:seed:destructive  # clears and reseeds missionthread_dev
+npm run db:seed:dev:destructive  # clears and reseeds missionthread_dev — nothing else
 ```
 
 This works via a shared guard (`packages/core/src/db-safety.ts`) that only
 authorizes an exact, approved `(host, port, database)` target — never a
-name that merely _looks_ right — and only for the one child process this
-command spawns; see `.env.example` for why the authorization flag itself
-is never checked into any example file.
+name that merely _looks_ right — for an explicitly declared scope (`dev`
+here), and only for the one child process this command spawns; see
+`.env.example` for why the authorization flag itself is never checked into
+any example file. The scope is never inferred from `DATABASE_URL`: a
+`dev`-scoped run can't touch the test database even if `DATABASE_URL`
+were ever misconfigured to point at it, and vice versa.
 
 ### Test database
 
@@ -168,6 +171,11 @@ script only authorizes an exact approved local test target
 npm run db:reset:test  # drops, re-migrates, and reseeds missionthread_test only
 ```
 
+CI uses a third, separate command (`db:seed:github-actions:internal`) that
+only authorizes the GitHub Actions service database and only runs inside
+an actual GitHub Actions job — it's not a normal local-development command
+and shouldn't be run by hand.
+
 ## Running the app
 
 ```bash
@@ -178,7 +186,7 @@ Visit `http://localhost:3000` — you'll be redirected to `/login`.
 
 ### Demo accounts
 
-Seeded by `npm run db:seed:destructive`, one per role. The password below is a fixed,
+Seeded by `npm run db:seed:dev:destructive`, one per role. The password below is a fixed,
 publicly documented **local-development-only** credential, not a real
 secret — it authenticates against your own local database only.
 
@@ -244,11 +252,15 @@ npm run smoke:test     # build + automated end-to-end smoke test
 `apps/web/scripts/smoke-test.mjs` against it, always pointed at the
 dedicated test database (loaded from `.env.test`, never the dev database —
 see the script's own comment for why). It exercises the full auth flow:
-unauthenticated redirects to `/login`, invalid credentials failing safely,
-valid seeded credentials authenticating, session contents (user ID and
-role), the authenticated dashboard rendering real seeded data, protected
-nav routes, and sign-out actually invalidating the session — 21 checks,
-run against the dedicated test database, never the dev database.
+unauthenticated redirects to `/login` (verifying both the redirect status
+and the actual destination), invalid credentials failing safely, valid
+seeded credentials authenticating, session contents (user ID and role),
+the authenticated dashboard rendering real seeded data, protected nav
+routes, and sign-out actually invalidating the session — run against the
+dedicated test database, never the dev database. The exact number of
+checks isn't documented here since it isn't maintained from one
+authoritative source; read `apps/web/scripts/smoke-test.mjs` for the
+current, complete list.
 
 All of the above are run in CI (`.github/workflows/ci.yml`) with
 `AI_MODE=mock`, so the pipeline never needs a live model API key.

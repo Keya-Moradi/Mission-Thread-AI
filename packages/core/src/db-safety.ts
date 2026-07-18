@@ -17,8 +17,8 @@ export interface ApprovedDatabaseTarget {
   host: string;
   port: string;
   database: string;
-  /** True only for the CI Postgres service tuple — see requiresCi below. */
-  requiresCi?: boolean;
+  /** True only for the GitHub Actions service-container tuple — see requiresGitHubActions below. */
+  requiresGitHubActions?: boolean;
 }
 
 /**
@@ -42,20 +42,23 @@ export const LOCAL_TEST_TARGETS: readonly ApprovedDatabaseTarget[] = [
 /**
  * The GitHub Actions `postgres:17-alpine` service container defined in
  * .github/workflows/ci.yml, reachable at the runner's localhost on the
- * standard Postgres port. `requiresCi: true` means this tuple only matches
- * when `CI` is exactly `"true"` — the variable GitHub Actions (and most CI
- * providers) sets automatically — so this specific host/port/database
- * combination can never be satisfied by a developer's own machine, where a
- * stray local Postgres could otherwise happen to be listening on 5432 with
- * a same-named database.
+ * standard Postgres port. `requiresGitHubActions: true` means this tuple
+ * only matches when `GITHUB_ACTIONS` is exactly `"true"` — the variable
+ * GitHub Actions specifically (not other CI providers) sets automatically
+ * for every workflow run. The generic `CI` variable was deliberately
+ * rejected as the authorizing check here: `CI=true` is a much looser
+ * convention that many local shells, editor integrations, and other CI
+ * providers also set, so it can't uniquely identify "this is actually a
+ * GitHub Actions runner" the way `GITHUB_ACTIONS` can. `CI` is not checked
+ * at all by this tuple — only `GITHUB_ACTIONS` is authoritative.
  *
  * Only "localhost" is listed, not "127.0.0.1", because that's what
  * .github/workflows/ci.yml actually configures for DATABASE_URL — adding a
  * second spelling nothing currently uses would be exactly the kind of
  * speculative allowlist entry this design is trying to avoid.
  */
-export const CI_TEST_TARGETS: readonly ApprovedDatabaseTarget[] = [
-  { host: "localhost", port: "5432", database: "missionthread_test", requiresCi: true },
+export const GITHUB_ACTIONS_TEST_TARGETS: readonly ApprovedDatabaseTarget[] = [
+  { host: "localhost", port: "5432", database: "missionthread_test", requiresGitHubActions: true },
 ];
 
 // IPv6 loopback ("::1") is intentionally not an approved host. Node's URL
@@ -119,7 +122,9 @@ export function findApprovedDatabaseTarget(
       if (candidate.host !== target.host) return false;
       if (candidate.port !== target.port) return false;
       if (candidate.database !== target.database) return false;
-      if (candidate.requiresCi && env.CI !== "true") return false;
+      // GITHUB_ACTIONS is the sole authority here — see the comment on
+      // GITHUB_ACTIONS_TEST_TARGETS for why CI is deliberately not checked.
+      if (candidate.requiresGitHubActions && env.GITHUB_ACTIONS !== "true") return false;
       return true;
     }) ?? null
   );
@@ -135,6 +140,37 @@ const TEST_TOKEN_PATTERN = /(^|[_-])test($|[_-])/i;
 
 export function isTestDatabaseName(databaseName: string): boolean {
   return TEST_TOKEN_PATTERN.test(databaseName);
+}
+
+/**
+ * Seed scope: which database a seed run is explicitly authorized for. This
+ * is supplied by the caller (via MISSIONTHREAD_SEED_SCOPE, set only for the
+ * seed child process by scripts/with-destructive-auth.mjs) and never
+ * inferred from DATABASE_URL — inferring it would mean a mistyped or
+ * misconfigured DATABASE_URL could silently widen which fixtures get
+ * cleared, instead of failing closed on an explicit mismatch.
+ */
+export const SEED_SCOPES = ["dev", "test", "github-actions"] as const;
+export type SeedScope = (typeof SEED_SCOPES)[number];
+
+/**
+ * Maps a seed scope to the exact target tuples that scope may touch, or
+ * null for a missing/unrecognized scope. seed.ts must treat null as a hard
+ * failure, not fall back to a broader default — there is no default scope.
+ */
+export function resolveSeedScopeTargets(
+  scope: string | undefined,
+): readonly ApprovedDatabaseTarget[] | null {
+  switch (scope) {
+    case "dev":
+      return LOCAL_DEV_TARGETS;
+    case "test":
+      return LOCAL_TEST_TARGETS;
+    case "github-actions":
+      return GITHUB_ACTIONS_TEST_TARGETS;
+    default:
+      return null;
+  }
 }
 
 export type DestructiveOperationFailureReason =
@@ -174,7 +210,7 @@ const DESTRUCTIVE_OPERATION_OPT_IN_VALUE = "true";
  *
  * The opt-in flag (ALLOW_DESTRUCTIVE_DATABASE_OPERATION) is deliberately
  * never set in any committed .env example file — it's supplied only by the
- * npm scripts whose names say what they do (db:seed:destructive,
+ * npm scripts whose names say what they do (db:seed:dev:destructive,
  * db:reset:test), via scripts/with-destructive-auth.mjs, for the lifetime
  * of that one child process. A flag that's "safe to leave enabled" isn't
  * actually authorizing anything; it has to cost something to set.

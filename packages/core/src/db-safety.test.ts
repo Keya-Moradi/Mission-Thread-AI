@@ -1,20 +1,22 @@
 import { describe, expect, it } from "vitest";
 import {
-  CI_TEST_TARGETS,
+  GITHUB_ACTIONS_TEST_TARGETS,
   LOCAL_DEV_TARGETS,
   LOCAL_TEST_TARGETS,
   checkDestructiveOperationAllowed,
   extractDatabaseName,
   findApprovedDatabaseTarget,
   isTestDatabaseName,
+  resolveSeedScopeTargets,
   sanitizeDatabaseUrl,
 } from "./db-safety";
 
-const ALL_TARGETS = [...LOCAL_DEV_TARGETS, ...LOCAL_TEST_TARGETS, ...CI_TEST_TARGETS];
-// CI_TEST_TARGETS is a fixed single-element array literal in db-safety.ts;
-// asserted non-null here purely to satisfy noUncheckedIndexedAccess, not
-// because its contents are actually uncertain at runtime.
-const CI_TARGET = CI_TEST_TARGETS[0]!;
+const ALL_TARGETS = [...LOCAL_DEV_TARGETS, ...LOCAL_TEST_TARGETS, ...GITHUB_ACTIONS_TEST_TARGETS];
+// GITHUB_ACTIONS_TEST_TARGETS is a fixed single-element array literal in
+// db-safety.ts; asserted non-null here purely to satisfy
+// noUncheckedIndexedAccess, not because its contents are actually
+// uncertain at runtime.
+const GITHUB_ACTIONS_TARGET = GITHUB_ACTIONS_TEST_TARGETS[0]!;
 
 function urlFor(host: string, port: string, database: string): string {
   return `postgresql://missionthread:secretpw@${host}:${port}/${database}`;
@@ -74,30 +76,91 @@ describe("findApprovedDatabaseTarget — exact (host, port, database) tuples", (
     },
   );
 
-  it("[positive] accepts the CI target when CI=true", () => {
-    const target = sanitizeDatabaseUrl(urlFor(CI_TARGET.host, CI_TARGET.port, CI_TARGET.database))!;
-    expect(findApprovedDatabaseTarget(target, CI_TEST_TARGETS, { CI: "true" })).not.toBeNull();
+  describe("GitHub Actions target — GITHUB_ACTIONS is the sole authority, not CI", () => {
+    const ghTarget = sanitizeDatabaseUrl(
+      urlFor(
+        GITHUB_ACTIONS_TARGET.host,
+        GITHUB_ACTIONS_TARGET.port,
+        GITHUB_ACTIONS_TARGET.database,
+      ),
+    )!;
+
+    it("[positive] passes with GITHUB_ACTIONS=true", () => {
+      expect(
+        findApprovedDatabaseTarget(ghTarget, GITHUB_ACTIONS_TEST_TARGETS, {
+          GITHUB_ACTIONS: "true",
+        }),
+      ).not.toBeNull();
+    });
+
+    it("[positive] passes with both GITHUB_ACTIONS=true and CI=true", () => {
+      expect(
+        findApprovedDatabaseTarget(ghTarget, GITHUB_ACTIONS_TEST_TARGETS, {
+          GITHUB_ACTIONS: "true",
+          CI: "true",
+        }),
+      ).not.toBeNull();
+    });
+
+    it("[negative] fails when both GITHUB_ACTIONS and CI are absent", () => {
+      expect(findApprovedDatabaseTarget(ghTarget, GITHUB_ACTIONS_TEST_TARGETS, {})).toBeNull();
+    });
+
+    it("[negative] fails with only CI=true (CI alone is not authoritative)", () => {
+      expect(
+        findApprovedDatabaseTarget(ghTarget, GITHUB_ACTIONS_TEST_TARGETS, { CI: "true" }),
+      ).toBeNull();
+    });
+
+    it("[negative] fails with GITHUB_ACTIONS=false", () => {
+      expect(
+        findApprovedDatabaseTarget(ghTarget, GITHUB_ACTIONS_TEST_TARGETS, {
+          GITHUB_ACTIONS: "false",
+        }),
+      ).toBeNull();
+    });
+
+    it.each(["TRUE", "True", " true", "true "])(
+      "[negative] fails with the vague/malformed value %j",
+      (value) => {
+        expect(
+          findApprovedDatabaseTarget(ghTarget, GITHUB_ACTIONS_TEST_TARGETS, {
+            GITHUB_ACTIONS: value,
+          }),
+        ).toBeNull();
+      },
+    );
+
+    it("[negative] fails for the dev database on port 5432, even with GITHUB_ACTIONS=true", () => {
+      const devOnGithubPort = sanitizeDatabaseUrl(
+        urlFor("localhost", "5432", "missionthread_dev"),
+      )!;
+      expect(
+        findApprovedDatabaseTarget(devOnGithubPort, GITHUB_ACTIONS_TEST_TARGETS, {
+          GITHUB_ACTIONS: "true",
+        }),
+      ).toBeNull();
+    });
+
+    it("[negative] fails for arbitrary hosts or ports, even with GITHUB_ACTIONS=true", () => {
+      const wrongHost = sanitizeDatabaseUrl(urlFor("example.com", "5432", "missionthread_test"))!;
+      const wrongPort = sanitizeDatabaseUrl(urlFor("localhost", "9999", "missionthread_test"))!;
+      expect(
+        findApprovedDatabaseTarget(wrongHost, GITHUB_ACTIONS_TEST_TARGETS, {
+          GITHUB_ACTIONS: "true",
+        }),
+      ).toBeNull();
+      expect(
+        findApprovedDatabaseTarget(wrongPort, GITHUB_ACTIONS_TEST_TARGETS, {
+          GITHUB_ACTIONS: "true",
+        }),
+      ).toBeNull();
+    });
   });
 
-  it("[negative] rejects the CI tuple's host/port/database when CI is absent", () => {
-    const target = sanitizeDatabaseUrl(urlFor(CI_TARGET.host, CI_TARGET.port, CI_TARGET.database))!;
-    expect(findApprovedDatabaseTarget(target, CI_TEST_TARGETS, {})).toBeNull();
-  });
-
-  it("[negative] rejects the CI tuple's host/port/database when CI=false", () => {
-    const target = sanitizeDatabaseUrl(urlFor(CI_TARGET.host, CI_TARGET.port, CI_TARGET.database))!;
-    expect(findApprovedDatabaseTarget(target, CI_TEST_TARGETS, { CI: "false" })).toBeNull();
-  });
-
-  it("[negative] rejects localhost:5432/missionthread_dev outside CI (wrong port for dev, and dev isn't a CI target at all)", () => {
+  it("[negative] rejects localhost:5432/missionthread_dev outside GitHub Actions (wrong port for dev, and dev isn't a GitHub Actions target at all)", () => {
     const target = sanitizeDatabaseUrl(urlFor("localhost", "5432", "missionthread_dev"))!;
     expect(findApprovedDatabaseTarget(target, ALL_TARGETS, {})).toBeNull();
-  });
-
-  it("[negative] rejects localhost:5432/missionthread_test outside CI (right host/db, wrong port unless CI=true)", () => {
-    const target = sanitizeDatabaseUrl(urlFor("localhost", "5432", "missionthread_test"))!;
-    expect(findApprovedDatabaseTarget(target, ALL_TARGETS, {})).toBeNull();
-    expect(findApprovedDatabaseTarget(target, ALL_TARGETS, { CI: "true" })).not.toBeNull();
   });
 
   it("[negative] rejects the test target when only the dev target is approved for this operation", () => {
@@ -133,6 +196,66 @@ describe("findApprovedDatabaseTarget — exact (host, port, database) tuples", (
   });
 });
 
+describe("resolveSeedScopeTargets — explicit seed scope, never inferred from DATABASE_URL", () => {
+  it("dev scope resolves to exactly LOCAL_DEV_TARGETS", () => {
+    expect(resolveSeedScopeTargets("dev")).toBe(LOCAL_DEV_TARGETS);
+  });
+
+  it("test scope resolves to exactly LOCAL_TEST_TARGETS", () => {
+    expect(resolveSeedScopeTargets("test")).toBe(LOCAL_TEST_TARGETS);
+  });
+
+  it("github-actions scope resolves to exactly GITHUB_ACTIONS_TEST_TARGETS", () => {
+    expect(resolveSeedScopeTargets("github-actions")).toBe(GITHUB_ACTIONS_TEST_TARGETS);
+  });
+
+  it("a missing scope resolves to null", () => {
+    expect(resolveSeedScopeTargets(undefined)).toBeNull();
+  });
+
+  it("an unknown scope resolves to null", () => {
+    expect(resolveSeedScopeTargets("production")).toBeNull();
+    expect(resolveSeedScopeTargets("")).toBeNull();
+    expect(resolveSeedScopeTargets("Dev")).toBeNull(); // case-sensitive: not a silent alias for "dev"
+  });
+
+  it("dev scope's targets cannot seed the test database", () => {
+    const testTarget = sanitizeDatabaseUrl(urlFor("localhost", "55432", "missionthread_test"))!;
+    const devTargets = resolveSeedScopeTargets("dev")!;
+    expect(findApprovedDatabaseTarget(testTarget, devTargets, {})).toBeNull();
+  });
+
+  it("test scope's targets cannot seed the dev database", () => {
+    const devTarget = sanitizeDatabaseUrl(urlFor("localhost", "55432", "missionthread_dev"))!;
+    const testTargets = resolveSeedScopeTargets("test")!;
+    expect(findApprovedDatabaseTarget(devTarget, testTargets, {})).toBeNull();
+  });
+
+  it("local scopes (dev, test) cannot seed port 5432", () => {
+    const devOn5432 = sanitizeDatabaseUrl(urlFor("localhost", "5432", "missionthread_dev"))!;
+    const testOn5432 = sanitizeDatabaseUrl(urlFor("localhost", "5432", "missionthread_test"))!;
+    expect(
+      findApprovedDatabaseTarget(devOn5432, resolveSeedScopeTargets("dev")!, {
+        GITHUB_ACTIONS: "true",
+      }),
+    ).toBeNull();
+    expect(
+      findApprovedDatabaseTarget(testOn5432, resolveSeedScopeTargets("test")!, {
+        GITHUB_ACTIONS: "true",
+      }),
+    ).toBeNull();
+  });
+
+  it("the github-actions scope cannot seed port 55432", () => {
+    const testOn55432 = sanitizeDatabaseUrl(urlFor("localhost", "55432", "missionthread_test"))!;
+    expect(
+      findApprovedDatabaseTarget(testOn55432, resolveSeedScopeTargets("github-actions")!, {
+        GITHUB_ACTIONS: "true",
+      }),
+    ).toBeNull();
+  });
+});
+
 describe("checkDestructiveOperationAllowed", () => {
   const baseEnv = { ALLOW_DESTRUCTIVE_DATABASE_OPERATION: "true" };
 
@@ -157,22 +280,22 @@ describe("checkDestructiveOperationAllowed", () => {
     expect(result.allowed).toBe(true);
   });
 
-  it("[positive] allows the CI seed against the CI target when CI=true and the flag is set", () => {
+  it("[positive] allows the GitHub Actions seed against its target when GITHUB_ACTIONS=true and the flag is set", () => {
     const result = checkDestructiveOperationAllowed({
-      operationName: "CI database seed",
+      operationName: "GitHub Actions database seed",
       databaseUrl: urlFor("localhost", "5432", "missionthread_test"),
-      approvedTargets: CI_TEST_TARGETS,
-      env: { ...baseEnv, CI: "true" },
+      approvedTargets: GITHUB_ACTIONS_TEST_TARGETS,
+      env: { ...baseEnv, GITHUB_ACTIONS: "true" },
     });
     expect(result.allowed).toBe(true);
   });
 
-  it("[negative] rejects the CI target when CI is absent, even with the flag set", () => {
+  it("[negative] rejects the GitHub Actions target when GITHUB_ACTIONS is absent, even with CI=true and the flag set", () => {
     const result = checkDestructiveOperationAllowed({
-      operationName: "CI database seed",
+      operationName: "GitHub Actions database seed",
       databaseUrl: urlFor("localhost", "5432", "missionthread_test"),
-      approvedTargets: CI_TEST_TARGETS,
-      env: baseEnv,
+      approvedTargets: GITHUB_ACTIONS_TEST_TARGETS,
+      env: { ...baseEnv, CI: "true" },
     });
     expect(result.allowed).toBe(false);
     expect(result.reason).toBe("target_not_approved");
@@ -267,6 +390,11 @@ describe("checkDestructiveOperationAllowed", () => {
       {
         databaseUrl: urlFor("localhost", "55432", "missionthread_test"),
         approvedTargets: LOCAL_TEST_TARGETS,
+        env: {},
+      },
+      {
+        databaseUrl: urlFor("localhost", "5432", "missionthread_test"),
+        approvedTargets: GITHUB_ACTIONS_TEST_TARGETS,
         env: {},
       },
     ];

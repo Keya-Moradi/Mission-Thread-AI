@@ -4,12 +4,7 @@ import { config as loadEnv } from "dotenv";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import { hashPassword } from "../src/auth/password";
-import {
-  CI_TEST_TARGETS,
-  LOCAL_DEV_TARGETS,
-  LOCAL_TEST_TARGETS,
-  checkDestructiveOperationAllowed,
-} from "../src/db-safety";
+import { checkDestructiveOperationAllowed, resolveSeedScopeTargets } from "../src/db-safety";
 
 // Environment files live at the repo root (SPEC.md §17); load explicitly so
 // this script works when invoked directly with `tsx prisma/seed.ts` from
@@ -42,18 +37,27 @@ const prisma = new PrismaClient({ adapter });
 const DEMO_PASSWORD = "MissionThread-Demo-2026!";
 
 async function clearExistingData() {
-  // This function deletes every row in every table — it must pass the same
-  // shared guard as the test-reset script before touching anything. This
-  // script runs in three contexts (direct dev seed, subprocess of
-  // reset-test-db.ts against the test database, and CI's seed step against
-  // the GitHub Actions Postgres service), so all three target sets are
-  // accepted here; each specific caller already narrowed which exact
-  // database it points DATABASE_URL at, and CI_TEST_TARGETS only matches
-  // when CI=true regardless.
+  // This function deletes every row in every table — it must know exactly
+  // which database it's authorized to touch before it touches anything.
+  // The scope is supplied explicitly via MISSIONTHREAD_SEED_SCOPE (set only
+  // for this process by scripts/with-destructive-auth.mjs) and never
+  // inferred from DATABASE_URL: a scope-blind guard that accepted "any
+  // approved target" would let a dev-scoped invocation accidentally clear
+  // the test database (or vice versa) if DATABASE_URL were ever
+  // misconfigured, instead of failing closed on the mismatch.
+  const scope = process.env.MISSIONTHREAD_SEED_SCOPE;
+  const approvedTargets = resolveSeedScopeTargets(scope);
+  if (!approvedTargets) {
+    console.error(
+      `Refusing database seed: MISSIONTHREAD_SEED_SCOPE must be exactly one of "dev", "test", or "github-actions" (got ${JSON.stringify(scope ?? null)}).`,
+    );
+    process.exit(1);
+  }
+
   const check = checkDestructiveOperationAllowed({
-    operationName: "database seed (clears existing data first)",
+    operationName: `database seed (${scope} scope, clears existing data first)`,
     databaseUrl: process.env.DATABASE_URL,
-    approvedTargets: [...LOCAL_DEV_TARGETS, ...LOCAL_TEST_TARGETS, ...CI_TEST_TARGETS],
+    approvedTargets,
   });
   if (!check.allowed) {
     console.error(check.message);
