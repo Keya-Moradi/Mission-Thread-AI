@@ -34,8 +34,18 @@ export default async function DashboardPage() {
       <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
         {STAT_CARDS.map((card) => (
           <div key={card.key} className="rounded-lg border border-border bg-surface p-4">
-            <div className="text-2xl font-semibold text-foreground">{summary[card.key]}</div>
-            <div className="mt-1 text-sm text-muted">{card.label}</div>
+            {/* Stable hooks for the smoke test (apps/web/scripts/smoke-test.mjs)
+                to read the exact labeled value, instead of searching the whole
+                page for a bare number that could coincidentally appear elsewhere. */}
+            <div
+              className="text-2xl font-semibold text-foreground"
+              data-testid={`stat-value-${card.key}`}
+            >
+              {summary[card.key]}
+            </div>
+            <div className="mt-1 text-sm text-muted" data-testid={`stat-label-${card.key}`}>
+              {card.label}
+            </div>
           </div>
         ))}
       </div>

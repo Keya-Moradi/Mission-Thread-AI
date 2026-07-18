@@ -5,8 +5,9 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import { hashPassword } from "../src/auth/password";
 import {
-  APPROVED_DEV_DATABASE_NAMES,
-  APPROVED_TEST_DATABASE_NAMES,
+  CI_TEST_TARGETS,
+  LOCAL_DEV_TARGETS,
+  LOCAL_TEST_TARGETS,
   checkDestructiveOperationAllowed,
 } from "../src/db-safety";
 
@@ -43,14 +44,16 @@ const DEMO_PASSWORD = "MissionThread-Demo-2026!";
 async function clearExistingData() {
   // This function deletes every row in every table — it must pass the same
   // shared guard as the test-reset script before touching anything. This
-  // script is invoked both directly (`npm run db:seed`, dev database) and
-  // as a subprocess of reset-test-db.ts (test database), so both database
-  // names are accepted here; each specific caller already narrowed which
-  // database it actually points DATABASE_URL at.
+  // script runs in three contexts (direct dev seed, subprocess of
+  // reset-test-db.ts against the test database, and CI's seed step against
+  // the GitHub Actions Postgres service), so all three target sets are
+  // accepted here; each specific caller already narrowed which exact
+  // database it points DATABASE_URL at, and CI_TEST_TARGETS only matches
+  // when CI=true regardless.
   const check = checkDestructiveOperationAllowed({
     operationName: "database seed (clears existing data first)",
     databaseUrl: process.env.DATABASE_URL,
-    approvedDatabaseNames: [...APPROVED_DEV_DATABASE_NAMES, ...APPROVED_TEST_DATABASE_NAMES],
+    approvedTargets: [...LOCAL_DEV_TARGETS, ...LOCAL_TEST_TARGETS, ...CI_TEST_TARGETS],
   });
   if (!check.allowed) {
     console.error(check.message);

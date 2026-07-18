@@ -45,6 +45,44 @@ function check(description, condition) {
   }
 }
 
+/**
+ * Verifies both that a response is a redirect AND that it actually points
+ * at /login, not merely that its status code is 302/307 — a redirect to
+ * the wrong place would previously have passed this check. Handles both
+ * relative ("/login") and absolute ("http://host/login") Location headers
+ * by resolving against BASE_URL, and requires no query string, since
+ * requireSession()'s redirect("/login") never adds one — a query string
+ * appearing would mean something unexpected changed in the redirect.
+ */
+function checkRedirectToLogin(description, response) {
+  const isRedirectStatus = [302, 307].includes(response.status);
+  check(`${description} (redirect status)`, isRedirectStatus);
+
+  const location = response.headers.get("location");
+  let destinationIsLogin = false;
+  if (location) {
+    try {
+      const resolved = new URL(location, BASE_URL);
+      destinationIsLogin = resolved.pathname === "/login" && resolved.search === "";
+    } catch {
+      destinationIsLogin = false;
+    }
+  }
+  check(`${description} (destination is exactly /login)`, destinationIsLogin);
+}
+
+/**
+ * Reads the text content of the first element carrying the given
+ * data-testid attribute. Used instead of searching the whole page for a
+ * bare value (e.g. `includes(">8<")`), which could pass because the number
+ * happens to appear somewhere unrelated, such as a count that isn't the
+ * one actually being checked.
+ */
+function getTestIdText(html, testId) {
+  const match = html.match(new RegExp(`data-testid="${testId}"[^>]*>([^<]*)<`));
+  return match ? match[1].trim() : null;
+}
+
 /** Minimal cookie jar: tracks the latest value for each cookie name across
  * requests, the same way a browser (or curl -b/-c) would, since Auth.js's
  * credentials flow spans a CSRF-token request, a sign-in POST, and then
@@ -136,13 +174,13 @@ async function main() {
 
     console.log("Unauthenticated access:");
     const home = await fetch(`${BASE_URL}/`, { redirect: "manual" });
-    check("GET / redirects to /login", [302, 307].includes(home.status));
+    checkRedirectToLogin("GET /", home);
 
     const program = await fetch(`${BASE_URL}/programs/edgelink-x`, { redirect: "manual" });
-    check("GET /programs/edgelink-x redirects to /login", [302, 307].includes(program.status));
+    checkRedirectToLogin("GET /programs/edgelink-x", program);
 
     const audit = await fetch(`${BASE_URL}/audit`, { redirect: "manual" });
-    check("GET /audit redirects to /login", [302, 307].includes(audit.status));
+    checkRedirectToLogin("GET /audit", audit);
 
     console.log("\nLogin page:");
     const loginPage = await fetch(`${BASE_URL}/login`);
@@ -161,7 +199,7 @@ async function main() {
       headers: { Cookie: badJar.header() },
       redirect: "manual",
     });
-    check("wrong password still redirects / to /login", [302, 307].includes(badHome.status));
+    checkRedirectToLogin("GET / with a wrong-password session", badHome);
 
     console.log("\nValid seeded credentials:");
     const jar = new CookieJar();
@@ -182,7 +220,14 @@ async function main() {
       dashboardHtml.includes("Program Manager"),
     );
     check("dashboard shows the seeded program name", dashboardHtml.includes("EdgeLink-X"));
-    check("dashboard shows the seeded requirement count (8)", dashboardHtml.includes(">8<"));
+    check(
+      "dashboard's requirement-count label reads 'Requirements'",
+      getTestIdText(dashboardHtml, "stat-label-requirementCount") === "Requirements",
+    );
+    check(
+      "dashboard's requirement-count value is the seeded count (8)",
+      getTestIdText(dashboardHtml, "stat-value-requirementCount") === "8",
+    );
 
     console.log("\nSession contents:");
     const sessionRes = await fetch(`${BASE_URL}/api/auth/session`, {
@@ -219,10 +264,7 @@ async function main() {
       headers: { Cookie: jar.header() },
       redirect: "manual",
     });
-    check(
-      "session no longer authenticates after sign-out",
-      [302, 307].includes(afterSignOut.status),
-    );
+    checkRedirectToLogin("GET / after sign-out", afterSignOut);
 
     console.log("\nServer logs:");
     const unexpectedErrors = serverOutput

@@ -9,13 +9,14 @@ export {
 export * from "./seed/ids";
 export * from "./record-types";
 export {
-  APPROVED_DEV_DATABASE_NAMES,
-  APPROVED_LOCAL_HOSTS,
-  APPROVED_TEST_DATABASE_NAMES,
+  CI_TEST_TARGETS,
+  LOCAL_DEV_TARGETS,
+  LOCAL_TEST_TARGETS,
   checkDestructiveOperationAllowed,
-  isApprovedTestDatabaseName,
+  findApprovedDatabaseTarget,
   isTestDatabaseName,
   sanitizeDatabaseUrl,
+  type ApprovedDatabaseTarget,
   type DestructiveOperationCheck,
   type DestructiveOperationFailureReason,
 } from "./db-safety";

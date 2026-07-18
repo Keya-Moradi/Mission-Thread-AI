@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { config as loadEnv } from "dotenv";
-import { APPROVED_TEST_DATABASE_NAMES, checkDestructiveOperationAllowed } from "../src/db-safety";
+import { LOCAL_TEST_TARGETS, checkDestructiveOperationAllowed } from "../src/db-safety";
 
 // Environment files live at the repo root (SPEC.md §17); load explicitly so
 // this script works when invoked directly, not just through npm/CI env vars.
@@ -22,7 +22,10 @@ const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const check = checkDestructiveOperationAllowed({
   operationName: "test database reset",
   databaseUrl: testDatabaseUrl,
-  approvedDatabaseNames: APPROVED_TEST_DATABASE_NAMES,
+  // Local-only tool: CI never runs this script (it migrates+seeds the CI
+  // Postgres service directly — see .github/workflows/ci.yml), so only the
+  // local test targets are ever appropriate here, never CI_TEST_TARGETS.
+  approvedTargets: LOCAL_TEST_TARGETS,
 });
 
 if (!check.allowed) {

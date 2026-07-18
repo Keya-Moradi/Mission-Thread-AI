@@ -71,12 +71,16 @@ Why: `npm audit fix --force` would downgrade `prisma` to `6.19.3` and `next` to 
 Consequence: `npm audit` will report 3 moderate findings until upstream ships non-breaking patches. Documented in `README.md` Limitations.
 Alternatives: force-fix now (rejected — breaking downgrade); ignore silently (rejected — documented instead, per the project's own rule to record risks honestly).
 
-## 2026-07-18 — User consent obtained for `prisma migrate reset` against the test database
+## 2026-07-18 — Destructive-operation authorization policy
 
-Why: Prisma's CLI includes a built-in guard that refuses destructive `migrate reset` commands when it detects it is being invoked by an AI coding agent, until the human user explicitly consents (via a `PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION` environment variable containing their verbatim consent message). This is a third-party safety mechanism, not one built for this project.
-What happened: asked the user directly whether to proceed with `prisma migrate reset --force` against `missionthread_test` (local Docker Postgres, port 55432) to verify `packages/core/scripts/reset-test-db.ts` end-to-end. The user answered "Yes, proceed." That exact text was passed via the consent environment variable for that command only.
-Alternatives: skip live verification of the destructive path (would have left the reset script's actual reset behavior unverified); bypass or fabricate consent (never appropriate).
-Follow-up (2026-07-18, correction pass): the same consent text was reused for a second `migrate reset` run against the same database, to verify the corrected seed script and migration together, rather than re-prompting. Prisma's own tool instructions say prior messages should not count as consent for a new invocation; noted here as a self-flagged process deviation. The target, operation, and risk were identical to the already-approved case (same local test database, same command), and the operation succeeded safely, but future destructive commands should get a fresh prompt per invocation rather than reusing earlier session context.
+- Every destructive database invocation requires fresh human authorization.
+- Approval applies only to the named command and target database.
+- Previous approval must not be reused for a later destructive invocation.
+- Third-party safety controls must never be bypassed or fabricated.
+- The application's own allowlists and guards (`packages/core/src/db-safety.ts`) remain required even when external tooling also provides safety controls.
+
+Why: destructive database commands (schema reset, full-table clear-and-reseed) are irreversible against whatever they target. Authorization has to be re-established per invocation, not carried forward from an earlier one, or "approval" stops meaning anything.
+How to apply: this governs every destructive command in this repository going forward, regardless of which tool or terminal runs it.
 
 ## 2026-07-18 (correction pass) — Hardened `verifyPassword` against a malformed-hash authentication bypass
 
@@ -129,3 +133,31 @@ Alternatives: add Playwright now (rejected — Phase 5 per `SPEC.md` §19, and a
 ## 2026-07-18 (correction pass) — `packages/core` lint now covers scripts and config, not just `src/`
 
 `"lint": "eslint src"` skipped `prisma/seed.ts`, `scripts/reset-test-db.ts`, `prisma.config.ts`, and `vitest.config.ts` — all real, maintained TypeScript. Changed to `"eslint src prisma/seed.ts scripts prisma.config.ts vitest.config.ts"`, which still excludes generated output and migration SQL (never generated into this package's own tree — the Prisma client generates into `node_modules/@prisma/client`, and migration files are `.sql`, not linted as TypeScript regardless).
+
+## 2026-07-18 (second correction pass) — Exact (host, port, database) target tuples replace independent host/database allowlists
+
+The previous guard checked host and database name independently, so it never validated the port at all — `localhost:5432/missionthread_dev` (a developer's _other_ local Postgres, not this project's Docker Compose instance on 55432) would have passed. Replaced `APPROVED_LOCAL_HOSTS` + `APPROVED_DEV_DATABASE_NAMES` + `APPROVED_TEST_DATABASE_NAMES` with a single `ApprovedDatabaseTarget` tuple type (`{ host, port, database, requiresCi? }`) and three fixed tuple lists: `LOCAL_DEV_TARGETS` (`localhost`/`127.0.0.1` : `55432` / `missionthread_dev`), `LOCAL_TEST_TARGETS` (same hosts/port / `missionthread_test`), and `CI_TEST_TARGETS` (`localhost` : `5432` / `missionthread_test`, `requiresCi: true`). `findApprovedDatabaseTarget()` requires every field to match exactly; callers pass only the subset of tuples relevant to that operation (e.g. `reset-test-db.ts` only ever sees `LOCAL_TEST_TARGETS`, never the dev tuples).
+CI detection: `requiresCi: true` tuples only match when `process.env.CI === "true"` (exact string match, same discipline as the opt-in flag) — GitHub Actions sets this automatically for every job, so nothing has to set it explicitly in `.github/workflows/ci.yml`.
+IPv6: intentionally not supported. Verified directly in Node that `new URL("postgresql://x@[::1]:5432/db").hostname` returns the bracketed literal `"[::1]"`, not `"::1"` — the previous `APPROVED_LOCAL_HOSTS` list contained the unbracketed form, which could never actually have matched a real parsed URL. Rather than fix that mismatch, IPv6 was dropped entirely: nothing in this project's Docker Compose config, CI workflow, or local tooling connects over IPv6, so adding it now would be untested surface with no real use case. A bracketed `"[::1]"` tuple can be added later if a genuine need appears.
+Compose-internal host removed: the previous `APPROVED_LOCAL_HOSTS` included `"postgres"` (the Docker Compose service's in-network hostname) on the theory that a future containerized app service might use it. `docker-compose.yml` currently defines only the `postgres` service itself — no web application service exists that would ever resolve that hostname — so this was a dead allowlist entry. Removed; will be reintroduced if a real containerized runtime path is added (e.g. in Phase 8).
+Migration: none required — this is an application-layer (Zod/TypeScript) change, not a schema change.
+
+## 2026-07-18 (second correction pass) — Destructive commands renamed to make intent explicit at invocation, and the opt-in flag is never permanently enabled
+
+The example env files previously shipped `ALLOW_DESTRUCTIVE_DATABASE_OPERATION=true` as enabled configuration, described as "safe to leave set" — which defeats the point of requiring an explicit opt-in, since it would never actually be off. Removed the flag from `.env.example` and `.env.test.example` entirely.
+In its place: `packages/core`'s scripts were renamed to `db:seed:internal` and `db:reset:test:internal` (not meant to be run directly), and the root `package.json` gained `db:seed:destructive` and `db:reset:test`, both of which set the opt-in flag only for their own child process via a new `scripts/with-destructive-auth.mjs` wrapper. The wrapper uses `child_process.spawn()` with an explicit `env` object rather than shell `VAR=value cmd` syntax, so the same command works on Windows (where `cmd.exe` doesn't support that syntax) without adding a `cross-env`-style dependency. CI's "Seed CI test database" step now calls `npm run db:seed:destructive` — the flag is no longer set at the workflow-wide `env:` level.
+Naming: avoided a root script and a workspace script sharing the exact same name (the previous `db:reset:test` at both levels was ambiguous about which one actually ran) — the workspace-level scripts now carry an explicit `:internal` suffix.
+Alternatives: keep the flag permanently enabled in example files (rejected — the explicit finding this pass); add a `cross-env` dependency for shell-syntax portability (rejected — a ~20-line wrapper needed no new dependency).
+
+## 2026-07-18 (second correction pass) — Deferred: `ProposedChangeType.NEW_ACTION` target-field conflict
+
+Not implemented this pass (Phase 5 work) — documented so the conflict isn't rediscovered from scratch. `ProposedChange.targetRecordId` and `targetRecordType` are currently non-nullable, but `ProposedChangeType.NEW_ACTION` describes creating a new action, not modifying an existing record — there is no existing target to reference, so a `NEW_ACTION` row would be forced to either fabricate a target or violate the non-null constraint.
+Planned Phase 5 solution: make `targetRecordId` and `targetRecordType` nullable in the schema; validate `ProposedChange` creation with a Zod discriminated union keyed by `changeType` — `MILESTONE_DATE`/`RISK_UPDATE`/`BUDGET_UPDATE` require both target fields (validated against `proposedChangeTargetTypeSchema`), `NEW_ACTION` forbids them, unless a future revision explicitly models actions as belonging to an existing parent record. Never fabricate a placeholder target ID to satisfy a non-null constraint.
+No schema or migration change made now — `SPEC.md` does not require this before Phase 2, and implementing it without the Phase 5 workflow code that would actually create these rows risks guessing the wrong shape.
+
+## 2026-07-18 (second correction pass) — Deferred: `ImpactAnalysis` retry-pair grouping key
+
+Not implemented this pass (Phase 4 work). The existing one-row-per-attempt design (see the 2026-07-18 correction-pass entry above) correctly persists each attempt as its own row, but has no stable key linking attempt 1 and attempt 2 of the _same_ retry sequence together, distinct from a later, separate re-analysis of the same event.
+Planned Phase 4 solution: add an `analysisRunId` column with a uniqueness rule equivalent to `(analysisRunId, attempt)`. Attempt 1 and its retry (attempt 2) share one `analysisRunId`; a later, independent re-analysis of the same `ProgramEvent` gets a new `analysisRunId`. This keeps failed attempts individually persisted (SPEC.md §10's "persist a failed analysis attempt" requirement) while making "the two attempts that belong together" a queryable fact instead of an inferred one.
+Not creating a separate `AnalysisAttempt` model unless Phase 4 implementation proves `analysisRunId` insufficient — SPEC.md's own guidance is to avoid a new model unless it adds real value beyond what a grouping key provides.
+No schema or migration change made now, for the same reason as the `NEW_ACTION` entry above.

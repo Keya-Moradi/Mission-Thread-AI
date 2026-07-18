@@ -23,8 +23,8 @@
     "db:generate": "npm run db:generate --workspace @missionthread/core",
     "db:validate": "npm run db:validate --workspace @missionthread/core",
     "db:migrate": "npm run db:migrate --workspace @missionthread/core",
-    "db:seed": "npm run db:seed --workspace @missionthread/core",
-    "db:reset:test": "npm run db:reset:test --workspace @missionthread/core",
+    "db:seed:destructive": "node scripts/with-destructive-auth.mjs npm run db:seed:internal --workspace @missionthread/core",
+    "db:reset:test": "node scripts/with-destructive-auth.mjs npm run db:reset:test:internal --workspace @missionthread/core",
     "smoke:test": "npm run build --workspace @missionthread/web && npm run smoke --workspace @missionthread/web"
   },
   "devDependencies": {

@@ -86,9 +86,9 @@ Full request/data flow and the Prisma domain model are documented in
 This project pins **Node 24.x** (Active LTS). The exact patch is recorded in
 [`.nvmrc`](.nvmrc).
 
-> Node 25 is a **Current**-only release line (odd majors never become LTS)
-> and is already end-of-life as of this writing — don't develop or build
-> against it even if it happens to be your system default.
+> Node 25 is an odd-numbered major that never received LTS and is now EOL;
+> this project targets Node 24 (Active LTS). Don't develop or build against
+> Node 25 even if it happens to be your system default.
 
 ```bash
 nvm install
@@ -134,17 +134,35 @@ avoids colliding with a Postgres you might already have running locally
 (see `docs/DECISIONS.md`). One container hosts two logical databases:
 `missionthread_dev` and `missionthread_test`.
 
+Safe, non-destructive setup and validation:
+
 ```bash
 npm run db:up          # start Postgres (docker compose up -d postgres)
 npm run db:generate    # generate the Prisma client
+npm run db:validate    # validate the Prisma schema
 npm run db:migrate     # apply migrations to missionthread_dev
-npm run db:seed        # deterministic seed data into missionthread_dev
 ```
+
+**Seeding is destructive** — it clears every row in the target database
+before recreating the deterministic fixtures, so it requires the
+deliberately named command below rather than a plain `db:seed`:
+
+```bash
+npm run db:seed:destructive  # clears and reseeds missionthread_dev
+```
+
+This works via a shared guard (`packages/core/src/db-safety.ts`) that only
+authorizes an exact, approved `(host, port, database)` target — never a
+name that merely _looks_ right — and only for the one child process this
+command spawns; see `.env.example` for why the authorization flag itself
+is never checked into any example file.
 
 ### Test database
 
-Integration tests must never run against the dev database. The reset script
-**refuses to run unless the target database name contains "test"**:
+Integration tests must never run against the dev database. The reset
+script only authorizes an exact approved local test target
+(`localhost:55432/missionthread_test` or `127.0.0.1:55432/missionthread_test`)
+— not merely a database name containing "test":
 
 ```bash
 npm run db:reset:test  # drops, re-migrates, and reseeds missionthread_test only
@@ -160,7 +178,7 @@ Visit `http://localhost:3000` — you'll be redirected to `/login`.
 
 ### Demo accounts
 
-Seeded by `npm run db:seed`, one per role. The password below is a fixed,
+Seeded by `npm run db:seed:destructive`, one per role. The password below is a fixed,
 publicly documented **local-development-only** credential, not a real
 secret — it authenticates against your own local database only.
 
@@ -172,6 +190,44 @@ secret — it authenticates against your own local database only.
 
 Password for all three: `MissionThread-Demo-2026!`
 
+## Docker
+
+Build the application image:
+
+```bash
+docker build -t missionthread-ai .
+```
+
+`prisma generate` runs during the build with a non-secret, unreachable
+placeholder `DATABASE_URL` (it never opens a connection at build time —
+see the Dockerfile's comment); the real database configuration is supplied
+entirely at container **runtime**, via `docker run`'s `-e` flags or your
+deployment platform's environment configuration, never baked into the
+image.
+
+A container cannot reach the host's Docker Compose Postgres through its
+own `localhost` — that would resolve inside the container, not on your
+machine. Use Docker Desktop's `host.docker.internal` address instead:
+
+```bash
+docker run --rm -p 3000:3000 \
+  -e DATABASE_URL="postgresql://missionthread:missionthread_local_dev_password@host.docker.internal:55432/missionthread_dev" \
+  -e AUTH_SECRET="<generate one with: npx auth secret>" \
+  -e AUTH_TRUST_HOST=true \
+  -e AI_MODE=mock \
+  missionthread-ai
+```
+
+Required runtime variables: `DATABASE_URL`, `AUTH_SECRET`, `AI_MODE=mock`,
+and `AUTH_TRUST_HOST=true` (or an explicit `AUTH_URL`) — Auth.js v5 rejects
+requests with an untrusted `Host` header by default, which a container
+behind a mapped port will otherwise trigger. Visit `http://localhost:3000/login`
+once the container is up.
+
+`docker-compose.yml` currently defines only the Postgres service, not an
+application container — the command above talks to that same Compose
+Postgres instance from outside Docker's internal network.
+
 ## Quality gate commands
 
 ```bash
@@ -181,7 +237,18 @@ npm run format         # Prettier write
 npm run typecheck     # tsc --noEmit across all workspaces
 npm run test           # Vitest unit tests (packages/core)
 npm run build           # production build of apps/web
+npm run smoke:test     # build + automated end-to-end smoke test
 ```
+
+`smoke:test` builds the production app, then runs
+`apps/web/scripts/smoke-test.mjs` against it, always pointed at the
+dedicated test database (loaded from `.env.test`, never the dev database —
+see the script's own comment for why). It exercises the full auth flow:
+unauthenticated redirects to `/login`, invalid credentials failing safely,
+valid seeded credentials authenticating, session contents (user ID and
+role), the authenticated dashboard rendering real seeded data, protected
+nav routes, and sign-out actually invalidating the session — 21 checks,
+run against the dedicated test database, never the dev database.
 
 All of the above are run in CI (`.github/workflows/ci.yml`) with
 `AI_MODE=mock`, so the pipeline never needs a live model API key.

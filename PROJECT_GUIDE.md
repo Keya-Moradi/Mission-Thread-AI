@@ -29,6 +29,7 @@ Read this file and `docs/SPEC.md` before planning or editing.
 - Never expose or log secrets.
 - Do not run destructive commands outside the project or its dedicated databases.
 - Ask at most one clarification question per phase; otherwise record assumptions in `docs/DECISIONS.md`.
+- Add concise contextual comments for non-obvious security boundaries, invariants, architectural tradeoffs, dangerous operations, runtime constraints, and deferred-phase assumptions. Do not comment obvious syntax or merely restate what the code does.
 
 ## Fixed architecture
 

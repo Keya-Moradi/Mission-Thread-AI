@@ -56,6 +56,10 @@ COPY --from=build --chown=nextjs:nodejs /app/apps/web/.next/static ./apps/web/.n
 USER nextjs
 EXPOSE 3000
 
-# Real configuration (DATABASE_URL, AUTH_SECRET, AI_MODE, ...) is supplied
-# by the container orchestrator at runtime — see docker-compose.yml.
+# Real configuration (DATABASE_URL, AUTH_SECRET, AI_MODE, AUTH_TRUST_HOST,
+# ...) is supplied by the container runtime or deployment environment
+# (docker run -e, or your platform's env config) — never baked into this
+# image. docker-compose.yml currently only defines the Postgres service, not
+# an application container; see README.md "Docker" for a runtime example
+# that reaches that same Postgres instance via host.docker.internal.
 CMD ["node", "apps/web/server.js"]

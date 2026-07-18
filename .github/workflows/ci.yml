@@ -17,20 +17,19 @@ env:
   AUTH_SECRET: "ci-only-secret-not-used-outside-this-workflow"
   DATABASE_URL: "postgresql://missionthread:ci_test_password@localhost:5432/missionthread_test"
   TEST_DATABASE_URL: "postgresql://missionthread:ci_test_password@localhost:5432/missionthread_test"
-  # The db-safety guard (packages/core/src/db-safety.ts) requires this
-  # explicit opt-in before it will let db:seed or db:reset:test touch data;
-  # it also independently checks that the target host and database name are
-  # on their approved allowlists, so this flag alone is not sufficient.
-  ALLOW_DESTRUCTIVE_DATABASE_OPERATION: "true"
+  # Deliberately NOT set at workflow level: ALLOW_DESTRUCTIVE_DATABASE_OPERATION
+  # is supplied only on the one step below that actually needs it, matching
+  # local usage (npm run db:seed:destructive) — see packages/core/src/db-safety.ts.
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     # A dedicated CI database, isolated to this job's ephemeral container —
-    # never the developer's local dev/test database. The name
-    # "missionthread_test" is on APPROVED_TEST_DATABASE_NAMES, the same
-    # allowlist packages/core/src/db-safety.ts enforces locally.
+    # never the developer's local dev/test database. host:port/database
+    # exactly matches CI_TEST_TARGETS in packages/core/src/db-safety.ts,
+    # which only matches when CI=true — a variable GitHub Actions sets
+    # automatically for every job, so it's not set explicitly here.
     services:
       postgres:
         image: postgres:17-alpine
@@ -81,7 +80,7 @@ jobs:
         run: npm run db:migrate:deploy --workspace @missionthread/core
 
       - name: Seed CI test database
-        run: npm run db:seed --workspace @missionthread/core
+        run: npm run db:seed:destructive
 
       - name: Production build
         run: npm run build
