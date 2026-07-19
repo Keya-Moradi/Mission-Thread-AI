@@ -4,55 +4,11 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import { eventEntrySchema, recordProgramEvent } from "@missionthread/core";
 import { auth } from "@/auth";
+import { buildEventEntryInputFromFormData } from "./form-input";
 
 export interface EventFormState {
   error: string | null;
   fieldErrors: Record<string, string>;
-}
-
-function toRequiredStringField(value: FormDataEntryValue | null): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function toOptionalStringField(value: FormDataEntryValue | null): string | undefined {
-  const trimmed = toRequiredStringField(value);
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function toQuantityField(value: FormDataEntryValue | null): number | undefined {
-  if (typeof value !== "string" || value.trim() === "") return undefined;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-/**
- * Reads only the fields this event type's contract actually uses — never
- * a client-supplied delayDays, actorUserId, or programId, none of which
- * this form even has inputs for. eventEntrySchema's `.strict()` would
- * reject any of those anyway, but they're not read from formData at all
- * as the first line of defense.
- */
-function buildRawInput(formData: FormData): unknown {
-  const eventType = formData.get("eventType");
-  if (eventType === "SUPPLIER_DELAY") {
-    return {
-      eventType: "SUPPLIER_DELAY",
-      componentId: toRequiredStringField(formData.get("componentId")),
-      supplierId: toRequiredStringField(formData.get("supplierId")),
-      originalDate: toRequiredStringField(formData.get("originalDate")),
-      revisedDate: toRequiredStringField(formData.get("revisedDate")),
-      confidence: toRequiredStringField(formData.get("confidence")),
-      quantity: toQuantityField(formData.get("quantity")),
-      reason: toOptionalStringField(formData.get("reason")),
-      rawNotes: toOptionalStringField(formData.get("rawNotes")),
-    };
-  }
-  return {
-    eventType: "GENERAL_UPDATE",
-    componentId: toOptionalStringField(formData.get("componentId")),
-    supplierId: toOptionalStringField(formData.get("supplierId")),
-    rawNotes: toRequiredStringField(formData.get("rawNotes")),
-  };
 }
 
 function toFieldErrors(error: z.ZodError): Record<string, string> {
@@ -77,7 +33,7 @@ export async function recordEventAction(
     return { error: "Your session has expired. Please sign in again.", fieldErrors: {} };
   }
 
-  const rawInput = buildRawInput(formData);
+  const rawInput = buildEventEntryInputFromFormData(formData);
 
   // Validated locally first so field-level errors can be shown next to
   // the specific input that caused them; recordProgramEvent() validates
