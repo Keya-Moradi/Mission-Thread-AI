@@ -12,10 +12,17 @@ import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { config as loadEnv } from "dotenv";
 
 const appDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const rootDir = path.resolve(appDir, "..", "..");
+// Resolved via Node's own module resolution (which walks up through
+// node_modules directories) rather than a hardcoded relative path, since
+// npm workspaces hoist `next` to the monorepo root's node_modules, not
+// apps/web's own — a literal `apps/web/node_modules/.bin/next` path would
+// never exist.
+const nextBinPath = createRequire(import.meta.url).resolve("next/dist/bin/next");
 
 // Always load .env.test explicitly, overriding any DATABASE_URL already in
 // the shell environment — this script's entire purpose is to run against
@@ -27,12 +34,26 @@ loadEnv({ path: path.join(rootDir, ".env.test"), override: true });
 const PORT = process.env.SMOKE_TEST_PORT ?? "3100";
 const BASE_URL = `http://localhost:${PORT}`;
 const START_TIMEOUT_MS = 30_000;
+// Belt-and-suspenders against the whole script ever hanging past this: a
+// prior version of this script spawned the server via `npx`, an extra
+// process layer that (on at least one environment observed in CI, though
+// not reliably reproduced locally) did not reliably propagate SIGTERM down
+// to the actual `next start` process, leaving the script's event loop alive
+// indefinitely — several past CI runs were silently auto-cancelled after
+// GitHub's 6-hour job timeout with no clear failure signal at all. This
+// watchdog guarantees a fast, loud failure instead of a silent multi-hour
+// hang, regardless of the exact cause.
+const WATCHDOG_TIMEOUT_MS = 90_000;
 
 const DEMO_EMAIL = "pm@missionthread.example";
 const DEMO_PASSWORD = "MissionThread-Demo-2026!";
 const DEMO_NAME = "Jordan Ellis";
 const DEMO_USER_ID = "USER-PM";
 const DEMO_ROLE = "PROGRAM_MANAGER";
+
+// Same shared demo password as the Program Manager — used only to prove
+// role-based access differs, never to submit anything.
+const ENGINEERING_LEAD_EMAIL = "lead@missionthread.example";
 
 let failureCount = 0;
 
@@ -154,7 +175,10 @@ async function signIn(jar, email, password) {
 
 async function main() {
   console.log(`Starting production server (next start -p ${PORT})...`);
-  const server = spawn("npx", ["next", "start", "-p", PORT], {
+  // Spawns the actual `next` binary directly, not through `npx` — one
+  // fewer process layer between this script and the server it needs to be
+  // able to reliably terminate. See WATCHDOG_TIMEOUT_MS above.
+  const server = spawn(nextBinPath, ["start", "-p", PORT], {
     cwd: appDir,
     env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -181,6 +205,11 @@ async function main() {
 
     const audit = await fetch(`${BASE_URL}/audit`, { redirect: "manual" });
     checkRedirectToLogin("GET /audit", audit);
+
+    const eventEntry = await fetch(`${BASE_URL}/programs/edgelink-x/events/new`, {
+      redirect: "manual",
+    });
+    checkRedirectToLogin("GET /programs/edgelink-x/events/new", eventEntry);
 
     console.log("\nLogin page:");
     const loginPage = await fetch(`${BASE_URL}/login`);
@@ -221,12 +250,25 @@ async function main() {
     );
     check("dashboard shows the seeded program name", dashboardHtml.includes("EdgeLink-X"));
     check(
+      "dashboard shows the executive dashboard heading",
+      dashboardHtml.includes("Executive Dashboard"),
+    );
+    check(
       "dashboard's requirement-count label reads 'Requirements'",
       getTestIdText(dashboardHtml, "stat-label-requirementCount") === "Requirements",
     );
     check(
       "dashboard's requirement-count value is the seeded count (8)",
       getTestIdText(dashboardHtml, "stat-value-requirementCount") === "8",
+    );
+    check(
+      "dashboard shows a readiness score (Phase 2 calculateReadinessScore, real data)",
+      /readiness-score/.test(dashboardHtml) &&
+        !dashboardHtml.includes('data-testid="readiness-score">—'),
+    );
+    check(
+      "dashboard shows a Record event link for the Program Manager",
+      dashboardHtml.includes("Record event"),
     );
 
     console.log("\nSession contents:");
@@ -241,9 +283,64 @@ async function main() {
     const programAuthed = await fetch(`${BASE_URL}/programs/edgelink-x`, {
       headers: { Cookie: jar.header() },
     });
+    const programHtml = await programAuthed.text();
     check("GET /programs/edgelink-x returns 200 when authenticated", programAuthed.status === 200);
+    check(
+      "program overview renders real database sections",
+      [
+        "Components and subsystems",
+        "Requirements and component traceability",
+        "Milestones",
+        "Dependency relationships",
+        "Risk register",
+        "Test outcomes and verification coverage",
+        "Budget items and variance",
+        "Suppliers",
+        "Recent events",
+      ].every((heading) => programHtml.includes(heading)),
+    );
+    check(
+      "program overview shows a seeded component by name",
+      programHtml.includes("EC-440 Compute Module"),
+    );
+
     const auditAuthed = await fetch(`${BASE_URL}/audit`, { headers: { Cookie: jar.header() } });
+    const auditHtml = await auditAuthed.text();
     check("GET /audit returns 200 when authenticated", auditAuthed.status === 200);
+    check("audit page renders the audit history heading", auditHtml.includes("Audit History"));
+    check(
+      "audit page shows the seeded EVENT_RECORDED fixture for the supplier-delay event",
+      auditHtml.includes("TRACE-EVT-SUPPLIER-001") && auditHtml.includes("EVT-SUPPLIER-001"),
+    );
+
+    console.log("\nEvent-entry access (role-based):");
+    const eventEntryAsPm = await fetch(`${BASE_URL}/programs/edgelink-x/events/new`, {
+      headers: { Cookie: jar.header() },
+    });
+    const eventEntryHtml = await eventEntryAsPm.text();
+    check("Program Manager can access the event-entry page (200)", eventEntryAsPm.status === 200);
+    check(
+      "event-entry page renders the form",
+      eventEntryHtml.includes("Record a program event") && eventEntryHtml.includes("Record event"),
+    );
+
+    const leadJar = new CookieJar();
+    await signIn(leadJar, ENGINEERING_LEAD_EMAIL, DEMO_PASSWORD);
+    check("Engineering Lead sign-in succeeds", leadJar.hasSessionCookie());
+    const eventEntryAsLead = await fetch(`${BASE_URL}/programs/edgelink-x/events/new`, {
+      headers: { Cookie: leadJar.header() },
+      redirect: "manual",
+    });
+    check(
+      "Engineering Lead is redirected away from the event-entry page, not shown the form",
+      [307, 302].includes(eventEntryAsLead.status),
+    );
+    const dashboardAsLead = await fetch(`${BASE_URL}/`, { headers: { Cookie: leadJar.header() } });
+    const dashboardAsLeadHtml = await dashboardAsLead.text();
+    check(
+      "Engineering Lead does not see a Record event link",
+      dashboardAsLead.status === 200 && !dashboardAsLeadHtml.includes("Record event"),
+    );
 
     console.log("\nSign-out:");
     const signOutCsrfRes = await fetch(`${BASE_URL}/api/auth/csrf`, {
@@ -281,16 +378,35 @@ async function main() {
   } finally {
     server.kill("SIGTERM");
     await sleep(500);
+    // If the server process (or a descendant of it) is still alive here,
+    // don't wait on it — forcibly kill it too, and don't let its still-open
+    // stdio pipes keep this script's event loop alive below.
+    if (server.exitCode === null && server.signalCode === null) {
+      server.kill("SIGKILL");
+    }
   }
 
   console.log("");
+  const exitCode = failureCount > 0 ? 1 : 0;
   if (failureCount > 0) {
     console.error(`Smoke test FAILED: ${failureCount} check(s) did not pass.`);
-    process.exitCode = 1;
   } else {
     console.log("Smoke test PASSED: all checks succeeded.");
   }
+  // Explicit exit, not a natural event-loop drain: guarantees this process
+  // terminates even if something (e.g. a not-fully-reaped server
+  // descendant holding a pipe open) would otherwise keep it alive — see
+  // WATCHDOG_TIMEOUT_MS above for the fuller story.
+  process.exit(exitCode);
 }
+
+const watchdog = setTimeout(() => {
+  console.error(
+    `Smoke test FAILED: did not complete within ${WATCHDOG_TIMEOUT_MS}ms (watchdog fired).`,
+  );
+  process.exit(1);
+}, WATCHDOG_TIMEOUT_MS);
+watchdog.unref();
 
 main().catch((error) => {
   console.error("Smoke test crashed:", error);

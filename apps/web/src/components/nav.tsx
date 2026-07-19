@@ -22,7 +22,7 @@ export function Nav({ user }: { user: { name?: string | null; role?: string } })
           narrow viewports instead of competing for space with the brand
           and user info in one row. */}
       <div className="mx-auto max-w-6xl px-4 pb-2 sm:px-6">
-        <NavLinks />
+        <NavLinks role={user.role} />
       </div>
     </header>
   );

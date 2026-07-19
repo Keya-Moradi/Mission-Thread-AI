@@ -68,6 +68,19 @@ export const EVENT_IDS = {
   general: ["EVT-002", "EVT-003", "EVT-004"] as const,
 };
 
+// One deterministic EVENT_RECORDED AuditEvent per seeded ProgramEvent (see
+// prisma/seed.ts seedAuditEvents) — demonstrates the Phase 3 audit shell
+// against a fresh reset without requiring a manual event submission first.
+export const AUDIT_EVENT_IDS = {
+  supplierDelay: "AUDIT-EVT-SUPPLIER-001",
+  general: ["AUDIT-EVT-002", "AUDIT-EVT-003", "AUDIT-EVT-004"] as const,
+};
+
+export const AUDIT_TRACE_IDS = {
+  supplierDelay: "TRACE-EVT-SUPPLIER-001",
+  general: ["TRACE-EVT-002", "TRACE-EVT-003", "TRACE-EVT-004"] as const,
+};
+
 // The DAG edges between milestones (see prisma/seed.ts seedDependencies).
 // Deterministic like every other seeded record, so a reset always produces
 // the same graph for screenshots, demos, and future dependency-chain tests.

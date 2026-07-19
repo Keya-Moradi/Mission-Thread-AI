@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 import { hashPassword } from "../src/auth/password";
 import {
   checkDestructiveOperationAllowed,
@@ -40,6 +40,8 @@ if (!process.env.DATABASE_URL) {
   loadEnv({ path: path.join(rootDir, process.env.NODE_ENV === "test" ? ".env.test" : ".env") });
 }
 import {
+  AUDIT_EVENT_IDS,
+  AUDIT_TRACE_IDS,
   BUDGET_IDS,
   COMPONENT_IDS,
   DEFECT_IDS,
@@ -751,6 +753,113 @@ async function seedEvents(programManagerId: string) {
   }
 }
 
+// One deterministic EVENT_RECORDED AuditEvent per seeded ProgramEvent, so
+// a fresh reset demonstrates the Phase 3 audit shell without requiring a
+// manual event submission first — mirrors the exact afterValue shape
+// recordProgramEvent() (packages/core/src/events/record-program-event.ts)
+// produces at runtime: structured facts only, and only booleans
+// (hasReason/hasRawNotes) for the free-text fields, never their full text.
+// Timestamps are fixed, explicit values (not @default(now())) so a reset
+// always produces the same rows — see docs/DECISIONS.md.
+async function seedAuditEvents(programManagerId: string) {
+  const auditSpecs: Array<{
+    id: string;
+    traceId: string;
+    createdAt: string;
+    targetRecordId: string;
+    afterValue: Prisma.InputJsonObject;
+  }> = [
+    {
+      id: AUDIT_EVENT_IDS.supplierDelay,
+      traceId: AUDIT_TRACE_IDS.supplierDelay,
+      createdAt: "2026-07-17T12:00:00.000Z",
+      targetRecordId: EVENT_IDS.supplierDelay,
+      afterValue: {
+        eventType: "SUPPLIER_DELAY",
+        componentId: COMPONENT_IDS.ec440,
+        supplierId: SUPPLIER_IDS.northstar,
+        originalDate: "2026-09-15",
+        revisedDate: "2026-10-13",
+        computedDelayDays: 28,
+        confidence: "MEDIUM",
+        quantity: 40,
+        hasReason: true,
+        hasRawNotes: true,
+      },
+    },
+    {
+      id: AUDIT_EVENT_IDS.general[0],
+      traceId: AUDIT_TRACE_IDS.general[0],
+      createdAt: "2026-07-17T12:05:00.000Z",
+      targetRecordId: EVENT_IDS.general[0],
+      afterValue: {
+        eventType: "GENERAL_UPDATE",
+        componentId: COMPONENT_IDS.battery,
+        supplierId: SUPPLIER_IDS.ironvale,
+        originalDate: null,
+        revisedDate: null,
+        computedDelayDays: null,
+        confidence: null,
+        quantity: null,
+        hasReason: false,
+        hasRawNotes: true,
+      },
+    },
+    {
+      id: AUDIT_EVENT_IDS.general[1],
+      traceId: AUDIT_TRACE_IDS.general[1],
+      createdAt: "2026-07-17T12:10:00.000Z",
+      targetRecordId: EVENT_IDS.general[1],
+      afterValue: {
+        eventType: "GENERAL_UPDATE",
+        componentId: COMPONENT_IDS.telemetry,
+        supplierId: SUPPLIER_IDS.paragon,
+        originalDate: null,
+        revisedDate: null,
+        computedDelayDays: null,
+        confidence: null,
+        quantity: null,
+        hasReason: false,
+        hasRawNotes: true,
+      },
+    },
+    {
+      id: AUDIT_EVENT_IDS.general[2],
+      traceId: AUDIT_TRACE_IDS.general[2],
+      createdAt: "2026-07-17T12:15:00.000Z",
+      targetRecordId: EVENT_IDS.general[2],
+      afterValue: {
+        eventType: "GENERAL_UPDATE",
+        componentId: COMPONENT_IDS.firmware,
+        supplierId: null,
+        originalDate: null,
+        revisedDate: null,
+        computedDelayDays: null,
+        confidence: null,
+        quantity: null,
+        hasReason: false,
+        hasRawNotes: true,
+      },
+    },
+  ];
+
+  for (const spec of auditSpecs) {
+    await prisma.auditEvent.create({
+      data: {
+        id: spec.id,
+        traceId: spec.traceId,
+        createdAt: new Date(spec.createdAt),
+        actorUserId: programManagerId,
+        actorType: "USER",
+        action: "EVENT_RECORDED",
+        targetRecordId: spec.targetRecordId,
+        targetRecordType: "PROGRAM_EVENT",
+        afterValue: spec.afterValue,
+      },
+    });
+  }
+}
+
 async function main() {
   console.log("Clearing existing data...");
   await clearExistingData(seedConfiguration);
@@ -787,6 +896,9 @@ async function main() {
 
   console.log("Seeding program events...");
   await seedEvents(programManager.id);
+
+  console.log("Seeding audit events...");
+  await seedAuditEvents(programManager.id);
 
   console.log("Seed complete.");
 }

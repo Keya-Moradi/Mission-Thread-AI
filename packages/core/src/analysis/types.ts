@@ -9,7 +9,7 @@ import type { RecordTypeValue } from "../record-types";
  */
 export type ServiceResult<T> = { ok: true; data: T } | { ok: false; error: DomainError };
 
-export type DomainErrorCode = "NOT_FOUND" | "VALIDATION_ERROR";
+export type DomainErrorCode = "NOT_FOUND" | "VALIDATION_ERROR" | "FORBIDDEN";
 
 export interface DomainError {
   code: DomainErrorCode;
@@ -42,6 +42,18 @@ export function notFound<T>(
 
 export function validationError<T>(message: string): ServiceResult<T> {
   return { ok: false, error: { code: "VALIDATION_ERROR", message } };
+}
+
+/**
+ * For an authenticated actor who is not permitted to perform the requested
+ * mutation — a missing/stale session user, or a role that isn't allowed —
+ * see docs/DECISIONS.md, "Phase 3 mutation authorization". Always a safe,
+ * generic message: never reveals whether an ID was malformed vs. simply
+ * lacked permission, which would otherwise leak information to an
+ * unauthorized caller.
+ */
+export function forbidden<T>(message: string): ServiceResult<T> {
+  return { ok: false, error: { code: "FORBIDDEN", message } };
 }
 
 /**

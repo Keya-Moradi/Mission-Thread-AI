@@ -69,3 +69,21 @@ export const proposedChangeTargetTypeSchema = z.enum(PROPOSED_CHANGE_TARGET_TYPE
  */
 export const AUDIT_TARGET_TYPES = RECORD_TYPES;
 export const auditTargetTypeSchema = z.enum(AUDIT_TARGET_TYPES);
+
+// Mirrors the Prisma `AuditAction` enum — used by the Phase 3 audit shell
+// (apps/web) to validate the `action` query-parameter filter against an
+// allowlist rather than accepting an arbitrary string.
+export const AUDIT_ACTIONS = [
+  "EVENT_RECORDED",
+  "ANALYSIS_STARTED",
+  "ANALYSIS_SUCCEEDED",
+  "ANALYSIS_FAILED",
+  "DECISION_RECORDED",
+  "CHANGES_APPLIED",
+] as const;
+export const auditActionSchema = z.enum(AUDIT_ACTIONS);
+
+// Mirrors the Prisma `AuditActor` enum — same purpose, for the `actorType`
+// query-parameter filter.
+export const AUDIT_ACTOR_TYPES = ["USER", "SYSTEM", "AI"] as const;
+export const auditActorTypeSchema = z.enum(AUDIT_ACTOR_TYPES);

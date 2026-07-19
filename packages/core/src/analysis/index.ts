@@ -5,7 +5,7 @@
 // packages/core/src/index.ts re-exports from.
 
 export type { ServiceResult, DomainError, DomainErrorCode, ImpactRelationship } from "./types";
-export { ok, notFound, validationError } from "./types";
+export { ok, notFound, validationError, forbidden } from "./types";
 
 export { getImpactedRequirements, getImpactedMilestones } from "./traceability";
 export type { ImpactedRequirement, ImpactedMilestone } from "./traceability";

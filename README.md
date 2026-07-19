@@ -15,14 +15,16 @@ program, customer, classified system, or export-controlled detail.
 
 ## Project status
 
-**Phase 2 of 8 (Deterministic program logic) — complete.** Workspaces,
-database schema, deterministic seed data, authentication, a minimal
-application shell, and the full deterministic program-analysis service
-layer (`packages/core/src/analysis`) all exist and are verified working.
-The actual supplier-delay → analysis → approval → audit workflow is not
-wired into `apps/web` yet — no UI or route calls these services, and there
-is no AI layer, approval workflow, or audit trail yet; see
-[Phase roadmap](#phase-roadmap) and [Limitations](#limitations) below.
+**Phase 3 of 8 (Core workflow UI) — complete.** Workspaces, database
+schema, deterministic seed data, authentication, the full deterministic
+program-analysis service layer (`packages/core/src/analysis`), and a real
+database-driven dashboard, program overview, event-entry form, and
+read-only audit shell all exist and are verified working. A Program
+Manager can record a supplier-delay or general-update event today, which
+is written transactionally with a matching audit entry — but nothing
+analyzes it yet: there is still no AI layer, no mitigation options, and no
+approval/apply workflow; see [Phase roadmap](#phase-roadmap) and
+[Limitations](#limitations) below.
 
 Development follows a phase-gated process defined in
 [`PROJECT_GUIDE.md`](PROJECT_GUIDE.md) and [`docs/SPEC.md`](docs/SPEC.md):
@@ -53,7 +55,9 @@ npm workspaces monorepo:
 
 ```
 apps/web              Next.js App Router UI, route handlers, server actions
+                        (dashboard, program overview, event entry, audit — Phase 3, done)
 packages/core          Zod schemas, deterministic services (Phase 2, done),
+                        event-entry contract + recordProgramEvent (Phase 3, done),
                         Prisma schema/client, AI evidence builder, mock
                         fixtures (Phase 4)
 packages/mcp-server     Read-only MCP server (placeholder — built in Phase 7)
@@ -269,19 +273,35 @@ current, complete list.
 All of the above are run in CI (`.github/workflows/ci.yml`) with
 `AI_MODE=mock`, so the pipeline never needs a live model API key.
 
-## Current routes and functionality (Phase 1)
+## Current routes and functionality (Phase 3)
 
 - `/login` — Credentials sign-in (Zod-validated, scrypt + `timingSafeEqual`
   password verification, JWT session).
-- `/` — Executive dashboard shell: real counts (requirements, milestones,
-  open risks, recorded events) pulled live from Postgres via Prisma.
-- `/programs/edgelink-x`, `/audit` — authenticated placeholder pages
-  confirming navigation, layout, and auth gating; full functionality is
-  Phase 3 and Phase 5 respectively.
+- `/` — Executive dashboard: readiness score with factor breakdown,
+  requirement/verification-gap/milestone/risk/defect counts, budget
+  planned/actual/variance, latest supplier-delay schedule exposure, and
+  recent events — all from the Phase 2 deterministic services and real
+  Postgres data. A failed calculation shows an explicit "unavailable"
+  state, never an invented `0`.
+- `/programs/edgelink-x` — full program overview: components, requirements
+  with component traceability and verification-gap status, milestones,
+  dependency relationships, risk register, test outcomes, open defects,
+  budget items and variance, suppliers, and recent events (submitted
+  supplier notes are clearly labeled as untrusted content and rendered as
+  plain text, never HTML).
+- `/programs/edgelink-x/events/new` — **Program Manager only.** Records a
+  `SUPPLIER_DELAY` or `GENERAL_UPDATE` event. Server-side validated,
+  authorized, and written transactionally with a matching `EVENT_RECORDED`
+  audit entry — see "Security and authorization" below. A non-manager is
+  redirected away before the form renders, and the underlying mutation
+  independently rejects a non-manager role regardless.
+- `/audit` — read-only, filterable audit history (action, actor type,
+  target type, trace ID — each validated against a fixed allowlist),
+  newest first, capped at 50 rows.
 
-Nothing beyond authentication and read-only counts is wired up yet — there
-is no event entry, no AI analysis, no approval workflow, and no audit log
-in this phase.
+Nothing beyond event intake and its audit trail is wired up yet — there is
+no AI analysis, no mitigation options, and no approval/apply workflow in
+this phase.
 
 ## Security and authorization
 
@@ -293,11 +313,16 @@ in this phase.
   Credentials-only setup).
 - All input to the Credentials provider is validated with Zod before it
   touches the database.
-- Authorization is intended to be enforced server-side on every mutation
-  once mutations exist (Phase 3+); UI role-gating is never treated as
-  sufficient on its own. No Next.js middleware/proxy is used for auth in
-  this phase — `auth()` is called directly in server layouts and pages,
-  which keeps Prisma and `node:crypto` out of the Edge runtime entirely.
+- Authorization is enforced server-side on the one mutation that exists so
+  far (`recordProgramEvent()`, event entry): it re-fetches the actor's
+  current role from the database on every call, never trusting a
+  session/JWT claim that could be stale. UI role-gating (hiding the
+  "Record event" link, redirecting a non-manager away from the event-entry
+  page) is a convenience only, never treated as sufficient on its own — see
+  `docs/DECISIONS.md`, "Mutation authorization." No Next.js middleware/proxy
+  is used for auth in this phase — `auth()` is called directly in server
+  layouts and pages, which keeps Prisma and `node:crypto` out of the Edge
+  runtime entirely.
 
 ## Mock vs. live AI
 
@@ -308,12 +333,14 @@ validated output with exactly one retry on failure). See `docs/SPEC.md` §9–10
 
 ## Limitations
 
-- **Phase 1–2 build.** The deterministic program-logic services (traceability,
-  dependency chains, verification gaps, related defects, schedule/budget
-  exposure, risk scoring, readiness scoring, bounded evidence assembly) exist
-  in `packages/core/src/analysis` and are fully unit-tested, but nothing in
-  `apps/web` calls them yet — no AI pipeline, approval workflow, or audit
-  trail exists yet either (Phase 3+).
+- **Phase 1–3 build.** The deterministic program-logic services
+  (traceability, dependency chains, verification gaps, related defects,
+  schedule/budget exposure, risk scoring, readiness scoring, bounded
+  evidence assembly) exist in `packages/core/src/analysis`, and a real
+  dashboard, program overview, event-entry form, and audit shell now call
+  them against live Postgres data. Event intake is the only mutation that
+  exists — there is still no AI pipeline, no mitigation options, and no
+  approval/apply workflow (Phase 4+).
 - **`next-auth` is on the v5 beta channel** (`5.0.0-beta.31`) — it's the
   version Auth.js's own docs currently recommend for the App Router, but
   it is pre-1.0 and could introduce breaking changes on upgrade.
@@ -339,7 +366,7 @@ validated output with exactly one retry on failure). See `docs/SPEC.md` §9–10
 | 0     | Plan (architecture, risks, planning docs) — done                                              |
 | **1** | **Foundation (workspaces, schema, seed, auth, shell) — done**                                 |
 | **2** | **Deterministic program logic (traceability/schedule/budget/risk/readiness/evidence) — done** |
-| 3     | Core workflow UI (dashboard, event entry, audit shell on real data)                           |
+| **3** | **Core workflow UI (dashboard, event entry, audit shell on real data) — done**                |
 | 4     | AI impact analysis (LLMProvider, mock/live, structured output, retry)                         |
 | 5     | Approval and audit (state machine, apply preview, append-only audit)                          |
 | 6     | Security and evals (threat model, prompt-injection defenses, evals)                           |

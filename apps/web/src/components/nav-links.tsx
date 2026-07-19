@@ -9,8 +9,15 @@ const NAV_LINKS = [
   { href: "/audit", label: "Audit" },
 ];
 
-export function NavLinks() {
+// Server-side authorization (recordProgramEvent() re-checking the actor's
+// current database role) is the real security boundary — this only
+// decides whether the link is worth showing. See
+// apps/web/src/lib/auth-helpers.ts, requireProgramManager().
+const RECORD_EVENT_LINK = { href: "/programs/edgelink-x/events/new", label: "Record event" };
+
+export function NavLinks({ role }: { role?: string }) {
   const pathname = usePathname();
+  const links = role === "PROGRAM_MANAGER" ? [...NAV_LINKS, RECORD_EVENT_LINK] : NAV_LINKS;
 
   return (
     <nav
@@ -21,7 +28,7 @@ export function NavLinks() {
       // a 3-item nav.
       className="flex items-center gap-1 overflow-x-auto"
     >
-      {NAV_LINKS.map((link) => {
+      {links.map((link) => {
         const isActive = link.href === "/" ? pathname === "/" : pathname.startsWith(link.href);
         return (
           <Link
