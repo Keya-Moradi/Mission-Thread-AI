@@ -157,6 +157,16 @@ A narrowly-scoped review confirmed one real, reproducible defect: the event-entr
 - [x] Re-ran the full quality gate: install, `db:validate`, `db:generate`, lint, format check, typecheck (all 3 workspaces), test (317 core + 15 new web = 332 total), production build, smoke test (41/41) — all passing. Confirmed the new pure-parser tests make zero database queries (test-database row counts unchanged before/after); zero `ImpactAnalysis`/`MitigationOption`/`ProposedChange`/`Decision` rows anywhere.
 - [x] Checked GitHub Actions status before starting: the prior push's CI run completed (not hung — the Phase 2 correction pass's smoke-test hang fix is confirmed working in the real CI environment) but failed at the smoke-test step on an unrelated, pre-existing defect — Auth.js `UntrustedHost` errors in the GitHub Actions runner environment specifically (`AUTH_TRUST_HOST`/`AUTH_URL` not configured for that context), causing every authenticated smoke check to fail there even though the same suite passes locally. Explicitly out of scope for this pass (which forbids modifying authentication) — recorded here as a known, currently-unfixed CI risk for a future pass to address.
 
+## Phase 3 CI repair — done (2026-07-19)
+
+Fixed exactly the CI `UntrustedHost` risk flagged at the end of the previous correction pass. Full detail in `docs/DECISIONS.md`'s "(Phase 3 CI repair)" entry.
+
+- [x] Added `AUTH_TRUST_HOST: "true"` to the `env:` block of the `Application smoke test` step only in `.github/workflows/ci.yml` — not at workflow scope, not inside `apps/web/src/auth.ts`. Non-secret CI runtime setting; no new GitHub secret needed.
+- [x] Tested the minimal fix first, per instructions, without speculatively also adding `AUTH_URL` — that addition is deferred unless an actual GitHub Actions run still shows a callback/origin/host-resolution error after this change.
+- [x] Every other CI boundary confirmed unchanged: `permissions: contents: read`, the Postgres service and `GITHUB_ACTIONS_TEST_TARGETS` tuple, `AI_MODE=mock`, migrate-then-seed-then-test ordering, per-step destructive authorization, the direct `next` binary spawn, `SIGTERM`/`SIGKILL` handling, the 90-second watchdog, and all 41 smoke-test assertions.
+- [x] Re-ran the full local quality gate: install, `db:validate`, `db:generate`, `db:reset:test`, lint, format check, typecheck (all 3 workspaces), test (317 core + 15 web = 332 total), production build, smoke test (41/41) — all passing. Confirmed zero `ImpactAnalysis`/`MitigationOption`/`ProposedChange`/`Decision` rows and an isolated, unaffected test database (unchanged seeded row counts before/after).
+- [x] Local success alone cannot prove the CI-specific `UntrustedHost` failure is actually resolved — this change is not committed or pushed yet; the next push-triggered GitHub Actions run must be inspected and confirmed green before this is considered verified end-to-end.
+
 ## Phase 4 — AI impact analysis (not started)
 
 ## Phase 5 — Approval and audit (not started)

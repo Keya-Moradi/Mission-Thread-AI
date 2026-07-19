@@ -91,5 +91,13 @@ jobs:
       - name: Production build
         run: npm run build
 
+      # AUTH_TRUST_HOST is scoped to this one step, not workflow-wide: only
+      # the production server this step launches (via npm run smoke, which
+      # spawns `next start` and inherits this step's environment) needs
+      # Auth.js to trust the request host it sees in the GitHub Actions
+      # runner — see docs/DECISIONS.md. Non-secret CI runtime setting, not
+      # a credential.
       - name: Application smoke test
+        env:
+          AUTH_TRUST_HOST: "true"
         run: npm run smoke --workspace @missionthread/web
