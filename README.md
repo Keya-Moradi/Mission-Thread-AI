@@ -15,16 +15,20 @@ program, customer, classified system, or export-controlled detail.
 
 ## Project status
 
-**Phase 3 of 8 (Core workflow UI) — complete.** Workspaces, database
+**Phase 4 of 8 (AI impact analysis) — complete.** Workspaces, database
 schema, deterministic seed data, authentication, the full deterministic
-program-analysis service layer (`packages/core/src/analysis`), and a real
-database-driven dashboard, program overview, event-entry form, and
-read-only audit shell all exist and are verified working. A Program
-Manager can record a supplier-delay or general-update event today, which
-is written transactionally with a matching audit entry — but nothing
-analyzes it yet: there is still no AI layer, no mitigation options, and no
-approval/apply workflow; see [Phase roadmap](#phase-roadmap) and
-[Limitations](#limitations) below.
+program-analysis service layer (`packages/core/src/analysis`), a real
+database-driven dashboard/program overview/event-entry form/audit shell,
+and now a full AI impact-analysis pipeline (`packages/core/src/ai`) all
+exist and are verified working. A Program Manager can record a
+supplier-delay or general-update event and trigger an impact analysis on
+it; the analysis runs through a bounded deterministic-evidence projection,
+a mock or live LLM provider, strict structured-output validation, and
+source-ID/deterministic-value semantic validation before exactly three
+mitigation options are persisted and shown in an analysis workspace and a
+printable readiness briefing. There is still no approval/rejection/apply
+workflow — mitigation options are proposals only; see
+[Phase roadmap](#phase-roadmap) and [Limitations](#limitations) below.
 
 Development follows a phase-gated process defined in
 [`PROJECT_GUIDE.md`](PROJECT_GUIDE.md) and [`docs/SPEC.md`](docs/SPEC.md):
@@ -55,11 +59,13 @@ npm workspaces monorepo:
 
 ```
 apps/web              Next.js App Router UI, route handlers, server actions
-                        (dashboard, program overview, event entry, audit — Phase 3, done)
+                        (dashboard, program overview, event entry, audit — Phase 3, done;
+                        analysis trigger, analysis workspace, readiness briefing — Phase 4, done)
 packages/core          Zod schemas, deterministic services (Phase 2, done),
                         event-entry contract + recordProgramEvent (Phase 3, done),
-                        Prisma schema/client, AI evidence builder, mock
-                        fixtures (Phase 4)
+                        AI provider abstraction + mock/live providers + orchestration
+                        (packages/core/src/ai — Phase 4, done),
+                        Prisma schema/client
 packages/mcp-server     Read-only MCP server (placeholder — built in Phase 7)
 docs/                   Spec, plans, tasks, decisions, architecture, threat model
 evals/                  AI pipeline evaluations (Phase 6)
@@ -81,7 +87,8 @@ Full request/data flow and the Prisma domain model are documented in
 - Tailwind CSS
 - Vitest (unit tests); Playwright (Phase 5+)
 - Docker Compose (local Postgres); GitHub Actions (CI)
-- Structured JSON logging (Phase 4+)
+- Structured JSON logging (`packages/core/src/ai/logging.ts`)
+- `openai` npm package (Responses API, live AI mode only)
 
 ## Prerequisites
 
@@ -134,6 +141,13 @@ so link the root file into place once:
 ```bash
 ln -s ../../.env apps/web/.env
 ```
+
+`AI_MODE` must be exactly `mock` or `live` (see `.env.example`). Local
+development and CI both use `mock`, which needs no API key. `live` requires
+`OPENAI_API_KEY` and `OPENAI_MODEL` (never hardcoded — see
+`packages/core/src/ai/openai-provider.ts`); no example file ships a real
+key, and no automated test, smoke check, or CI step ever calls the live
+provider.
 
 ## Database (Docker Compose, port 55432)
 
@@ -273,7 +287,7 @@ current, complete list.
 All of the above are run in CI (`.github/workflows/ci.yml`) with
 `AI_MODE=mock`, so the pipeline never needs a live model API key.
 
-## Current routes and functionality (Phase 3)
+## Current routes and functionality (Phase 4)
 
 - `/login` — Credentials sign-in (Zod-validated, scrypt + `timingSafeEqual`
   password verification, JWT session).
@@ -298,10 +312,28 @@ All of the above are run in CI (`.github/workflows/ci.yml`) with
 - `/audit` — read-only, filterable audit history (action, actor type,
   target type, trace ID — each validated against a fixed allowlist),
   newest first, capped at 50 rows.
+- `/programs/edgelink-x/analyses/[id]` — analysis workspace for one
+  analysis run (`[id]` is the logical `analysisRunId`, shared by an
+  attempt and its one retry). All authenticated roles may view: run
+  status, every attempt's number/status/trace ID/provider/model/duration,
+  event facts, deterministic schedule/budget exposure, verification gaps,
+  assumptions, unknowns, bounded evidence citations, executive summary,
+  mission impact, and — on success — exactly three mitigation options with
+  the recommended one clearly marked. **Program Manager only:** triggering
+  a new analysis, via an "Analyze" control on the program overview's
+  Recent Events section.
+- `/programs/edgelink-x/briefings/[id]` — read-only, printable readiness
+  briefing for a successfully completed analysis run. Shows the trace ID,
+  confidence, assumptions, unknowns, schedule/budget exposure, key
+  verification gaps, relevant risks, the three mitigation options and the
+  recommendation, and source references — explicit throughout that the
+  options are proposals pending human review, never an approved or applied
+  change. A pending or failed run shows a safe "briefing unavailable"
+  state instead of a fabricated completed view.
 
-Nothing beyond event intake and its audit trail is wired up yet — there is
-no AI analysis, no mitigation options, and no approval/apply workflow in
-this phase.
+No approval, rejection, revision, or apply workflow exists yet — a
+mitigation option is a proposal only. No `Decision` or `ProposedChange` row
+is ever created by anything in this phase.
 
 ## Security and authorization
 
@@ -326,21 +358,65 @@ this phase.
 
 ## Mock vs. live AI
 
-Not built yet (Phase 4). The eventual design: an `LLMProvider` interface
-with a deterministic **mock** mode (no API key, used in CI and demos) and
-an optional **live** mode (one provider adapter, server-only secret,
-validated output with exactly one retry on failure). See `docs/SPEC.md` §9–10.
+An `LLMProvider` interface (`packages/core/src/ai/provider.ts`) with two
+implementations:
+
+- **Mock** (`AI_MODE=mock`, default for local dev and CI) — deterministic,
+  no API key, no network. `generateMockImpactAnalysis()` is a pure function
+  of the bounded model-input projection: identical input always produces
+  identical output, exactly three mitigation options with exactly one
+  recommended, and never an invented date, dollar amount, or record ID —
+  every citation comes from the supplied evidence allowlist, every
+  monetary/schedule figure is either `null` or the deterministic value
+  already computed by `packages/core/src/analysis`.
+- **Live** (`AI_MODE=live`) — the official `openai` npm package's
+  **Responses API**, with strict JSON-schema structured output generated
+  from the same authoritative Zod schema every attempt is validated
+  against (`z.toJSONSchema()`, not a hand-duplicated schema), `store:
+false`, no streaming/tools/web search/file search/conversations. Requires
+  server-only `OPENAI_API_KEY`/`OPENAI_MODEL`. No automated test, smoke
+  check, or CI step ever exercises this path — see
+  `packages/core/src/ai/openai-provider.ts`.
+
+Every attempt's output — from either provider — is re-validated twice
+before anything is persisted: structurally against the authoritative Zod
+output schema, then semantically against the request's own model input
+(every cited source ID must exist in the supplied evidence allowlist; the
+reported schedule/budget exposure must exactly equal the deterministic
+value already computed). On a retryable failure (malformed JSON, schema
+violation, invalid citation, deterministic mismatch, transient provider
+error), the orchestration service retries exactly once with concise
+validation feedback; a configuration failure (missing key/model) is never
+retried. See `docs/SPEC.md` §9–10 and `docs/ARCHITECTURE.md`.
 
 ## Limitations
 
-- **Phase 1–3 build.** The deterministic program-logic services
+- **Phase 1–4 build.** The deterministic program-logic services
   (traceability, dependency chains, verification gaps, related defects,
   schedule/budget exposure, risk scoring, readiness scoring, bounded
-  evidence assembly) exist in `packages/core/src/analysis`, and a real
-  dashboard, program overview, event-entry form, and audit shell now call
-  them against live Postgres data. Event intake is the only mutation that
-  exists — there is still no AI pipeline, no mitigation options, and no
-  approval/apply workflow (Phase 4+).
+  evidence assembly) exist in `packages/core/src/analysis`, a real
+  dashboard/program overview/event-entry form/audit shell call them
+  against live Postgres data, and a full AI impact-analysis pipeline
+  (`packages/core/src/ai`) now produces persisted, validated mitigation
+  options. There is still no approval/rejection/revision workflow and no
+  apply/transactional-change path — a mitigation option is a proposal only,
+  and no `Decision`/`ProposedChange` row is ever created (Phase 5+).
+- **Live AI mode is unverified against the real OpenAI API in this
+  repository.** The Responses API request shape and the strict JSON-schema
+  structured-output configuration were built against the `openai` npm
+  package's published TypeScript types and Structured Outputs
+  documentation, but no automated test, smoke check, or CI step is
+  permitted to spend real API credit — only `AI_MODE=mock` runs
+  automatically anywhere in this repository. A developer with their own
+  `OPENAI_API_KEY` should treat a first live run as the actual verification
+  of that integration, not this codebase's test suite.
+- **Deterministic-equality validation trusts specific Phase 2 field names.**
+  Semantic validation (`packages/core/src/ai/output-validation.ts`) compares
+  a model's reported schedule/budget exposure against
+  `ScheduleExposureResult.directDelayDays` and
+  `BudgetExposureResult.totalDeterministicExposure` specifically — see
+  `docs/DECISIONS.md`. A future Phase 2 field rename would need this
+  mapping updated in lockstep; nothing enforces that automatically today.
 - **`next-auth` is on the v5 beta channel** (`5.0.0-beta.31`) — it's the
   version Auth.js's own docs currently recommend for the App Router, but
   it is pre-1.0 and could introduce breaking changes on upgrade.
@@ -367,7 +443,7 @@ validated output with exactly one retry on failure). See `docs/SPEC.md` §9–10
 | **1** | **Foundation (workspaces, schema, seed, auth, shell) — done**                                 |
 | **2** | **Deterministic program logic (traceability/schedule/budget/risk/readiness/evidence) — done** |
 | **3** | **Core workflow UI (dashboard, event entry, audit shell on real data) — done**                |
-| 4     | AI impact analysis (LLMProvider, mock/live, structured output, retry)                         |
+| **4** | **AI impact analysis (LLMProvider, mock/live, structured output, retry) — done**              |
 | 5     | Approval and audit (state machine, apply preview, append-only audit)                          |
 | 6     | Security and evals (threat model, prompt-injection defenses, evals)                           |
 | 7     | Graph and MCP (React Flow thread view, read-only MCP server)                                  |

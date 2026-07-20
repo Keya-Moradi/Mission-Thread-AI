@@ -106,3 +106,38 @@ export const DEMO_USER_IDS = {
   engineeringLead: "USER-ENG-LEAD",
   executiveViewer: "USER-EXEC",
 } as const;
+
+// Phase 4: the one seeded demonstration AI impact analysis, for
+// EVT-SUPPLIER-001. Its content is not hand-authored — prisma/seed.ts calls
+// the real, production buildModelInputProjection() + generateMockImpactAnalysis()
+// functions against the live seeded event and persists whatever they
+// produce, so these IDs only need to cover the fixed identifiers a demo
+// needs to link to (the run/attempt/trace and the 3 mitigation options,
+// always exactly 3) — SourceReference row IDs are derived deterministically
+// from each cited record's own (recordType, recordId) instead of being
+// pre-enumerated here, since the exact evidence citation set depends on
+// runtime data, not a fixed list.
+export const ANALYSIS_IDS = {
+  supplierDelay: "ANALYSIS-EVT-SUPPLIER-001",
+} as const;
+
+export const ANALYSIS_RUN_IDS = {
+  supplierDelay: "RUN-EVT-SUPPLIER-001",
+} as const;
+
+export const ANALYSIS_TRACE_IDS = {
+  supplierDelay: "TRACE-ANALYSIS-EVT-SUPPLIER-001",
+} as const;
+
+export const MITIGATION_OPTION_IDS = {
+  supplierDelay: [
+    "MIT-EVT-SUPPLIER-001-1",
+    "MIT-EVT-SUPPLIER-001-2",
+    "MIT-EVT-SUPPLIER-001-3",
+  ] as const,
+} as const;
+
+export const ANALYSIS_AUDIT_EVENT_IDS = {
+  started: "AUDIT-ANALYSIS-EVT-SUPPLIER-001-STARTED",
+  succeeded: "AUDIT-ANALYSIS-EVT-SUPPLIER-001-SUCCEEDED",
+} as const;

@@ -31,3 +31,4 @@ export type { PrismaClient, User } from "@prisma/client";
 export { Role } from "@prisma/client";
 export * from "./analysis";
 export * from "./events";
+export * from "./ai";

@@ -5,7 +5,7 @@ import { SignOutButton } from "./sign-out-button";
 
 export function Nav({ user }: { user: { name?: string | null; role?: string } }) {
   return (
-    <header className="border-b border-border bg-surface">
+    <header className="border-b border-border bg-surface print:hidden">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
         <Link href="/" className="shrink-0 text-sm font-semibold tracking-tight text-foreground">
           MissionThread AI

@@ -163,9 +163,10 @@ model User {
   passwordHash String
   createdAt    DateTime @default(now())
 
-  createdEvents ProgramEvent[] @relation("EventCreatedBy")
-  decisions     Decision[]     @relation("DecisionActor")
-  auditEvents   AuditEvent[]   @relation("AuditActorUser")
+  createdEvents    ProgramEvent[]   @relation("EventCreatedBy")
+  decisions        Decision[]       @relation("DecisionActor")
+  auditEvents      AuditEvent[]     @relation("AuditActorUser")
+  requestedAnalyses ImpactAnalysis[] @relation("AnalysisRequestedBy")
 
   @@index([role])
 }
@@ -395,15 +396,16 @@ model ProgramEvent {
 }
 
 // One row per provider attempt (see docs/DECISIONS.md, 2026-07-18
-// "ImpactAnalysis attempt lifecycle"). No grouping key yet links a retry
-// pair (attempt 1 + attempt 2) together, distinct from a later, separate
-// re-analysis of the same event — deferred to Phase 4 as `analysisRunId`
-// with a (analysisRunId, attempt) uniqueness rule (see docs/DECISIONS.md,
-// "Deferred: ImpactAnalysis retry-pair grouping key"). Not added now
-// because Phase 4's orchestration code doesn't exist yet to populate it.
+// "ImpactAnalysis attempt lifecycle"). `analysisRunId` links a retry pair
+// (attempt 1 + attempt 2 of the same triggering call) together, distinct
+// from a later, independent re-analysis of the same event, which gets a
+// new `analysisRunId` — see docs/DECISIONS.md, "Phase 4 analysisRunId
+// grouping key" (supersedes the deferred-work note this replaced).
 model ImpactAnalysis {
   id                   String            @id @default(cuid())
   programEventId       String
+  analysisRunId        String
+  requestedById        String
   traceId              String            @unique
   status               AnalysisStatus
   aiMode               String
@@ -418,15 +420,21 @@ model ImpactAnalysis {
   assumptions          Json?
   unknowns             Json?
   confidence           ConfidenceLevel?
+  validationPassed     Boolean?
+  validationErrors     Json?
   errorCategory        String?
   durationMs           Int?
   createdAt            DateTime          @default(now())
 
   programEvent      ProgramEvent       @relation(fields: [programEventId], references: [id])
+  requestedBy       User               @relation("AnalysisRequestedBy", fields: [requestedById], references: [id])
   mitigationOptions MitigationOption[]
   sourceReferences  SourceReference[]
 
+  @@unique([analysisRunId, attempt])
   @@index([programEventId])
+  @@index([analysisRunId])
+  @@index([requestedById])
 }
 
 // The bounded evidence allowlist an analysis was built from and/or cited.

@@ -4,15 +4,17 @@ This document describes the **target** architecture established during
 Phase 0 planning. Sections are marked with what phase actually builds them;
 see [`docs/TASKS.md`](TASKS.md) for what exists in the repository right now.
 As of this writing, Phase 1 (workspaces, schema, seed data, auth, base
-shell), Phase 2 (deterministic program-analysis services), and Phase 3
-(core workflow UI: dashboard, program overview, event entry, audit shell)
-are complete; everything under "AI" and most of "Observability" below is
-still planned, not implemented.
+shell), Phase 2 (deterministic program-analysis services), Phase 3 (core
+workflow UI: dashboard, program overview, event entry, audit shell), and
+Phase 4 (AI impact analysis: provider abstraction, mock/live providers,
+structured-output validation, orchestration, analysis workspace, readiness
+briefing) are complete; the approval/apply workflow ("AI" section's
+mitigation-option → decision path) is still Phase 5, not implemented.
 
 ## Workspaces
 
-- `apps/web` — Next.js App Router UI + route handlers/server actions. _(Phase 1: scaffold, auth, base shell. Phase 3: dashboard, program overview, event entry, audit shell — done. Phases 4–5: analysis workspace, approval UI.)_
-- `packages/core` — Zod schemas, deterministic services, Prisma schema/client. _(Phase 1: schema, auth, seed, db-safety. Phase 2: deterministic services — done. Phase 3: event-entry contract + `recordProgramEvent()` mutation — done. Phase 4: AI evidence builder + `LLMProvider`, mock fixtures, prompts.)_
+- `apps/web` — Next.js App Router UI + route handlers/server actions. _(Phase 1: scaffold, auth, base shell. Phase 3: dashboard, program overview, event entry, audit shell — done. Phase 4: Analyze trigger, analysis workspace, readiness briefing — done. Phase 5: approval UI.)_
+- `packages/core` — Zod schemas, deterministic services, AI provider abstraction, Prisma schema/client. _(Phase 1: schema, auth, seed, db-safety. Phase 2: deterministic services — done. Phase 3: event-entry contract + `recordProgramEvent()` mutation — done. Phase 4: `packages/core/src/ai` — `LLMProvider`, mock/live providers, model-input projection, output schema, semantic validation, orchestration — done.)_
 - `packages/mcp-server` — Phase 7: read-only MCP tools reusing `packages/core`. _(Not started — placeholder package only.)_
 
 ## Deterministic program-analysis services — implemented (Phase 2)
@@ -48,35 +50,74 @@ Every function returns a `ServiceResult<T>` (`{ ok: true, data } | { ok: false, 
 - `/programs/edgelink-x/events/new` — event entry, Program-Manager-only. A server action (`actions.ts`) validates via `eventEntrySchema` and calls `packages/core`'s `recordProgramEvent(input, actorUserId)`, never trusting a client-supplied actor, program, or `delayDays`.
 - `/audit` — read-only audit shell: real `AuditEvent` rows, Zod-enum-validated filters (`action`/`actorType`/`targetType`/`traceId`), deterministic `createdAt` desc/`id` desc ordering, a hard 50-row cap.
 
+## Analysis workspace and readiness briefing UI — implemented (Phase 4)
+
+- `/programs/edgelink-x` — Recent Events section gained a Program-Manager-only
+  "Analyze" control per event (`analyze-button.tsx`, a small client component
+  wrapping a server-action form with `useFormStatus()` disable-while-pending),
+  and an `analysisError` banner for a request-level failure (bad session,
+  unknown event, non-manager role). `actions.ts`'s `analyzeEventAction()`
+  takes the actor ID only from the session and relies entirely on
+  `runImpactAnalysis()`'s own authorization re-check — it duplicates nothing.
+- `/programs/edgelink-x/analyses/[id]` — analysis workspace, `[id]` is the
+  logical `analysisRunId`. All authenticated roles may view: overall run
+  status, every attempt's number/status/trace ID/provider/model/duration/
+  safe failure detail, event facts, deterministic schedule/budget exposure,
+  verification gaps, assumptions, unknowns, evidence citations grouped by
+  record type, executive summary, mission impact, and — on success — exactly
+  three mitigation options with the recommended one marked
+  (`data-testid="mitigation-option"` / `"mitigation-recommended-badge"`, used
+  by the smoke test to count real DOM elements rather than raw text
+  occurrences — see the smoke-test.mjs comment on why: Next's RSC flight
+  payload re-embeds every rendered string a second time for hydration).
+  A pending/failed run shows a safe non-success state, never a fabricated
+  result.
+- `/programs/edgelink-x/briefings/[id]` — printable readiness briefing,
+  read-only, based only on a successful validated attempt. Print-specific
+  CSS (`print:hidden` on `Nav` and the page's own back-link/print-button row)
+  excludes navigation and interactive controls from the printed output. A
+  pending or failed run renders a safe "readiness briefing unavailable"
+  state with a link back to the workspace, never a fabricated completed view.
+
 ### Event-entry contract and mutation — implemented (Phase 3)
 
 `packages/core/src/events/` — `eventEntrySchema` (a strict Zod discriminated union keyed by `eventType`, `SUPPLIER_DELAY` | `GENERAL_UPDATE`) plus `recordProgramEvent(input, actorUserId)`, the only mutation Phase 3 performs. It validates input, re-fetches the actor's role from the database on every call (never a session/JWT claim), verifies component/supplier membership in `PROGRAM-EDGELINK-X`, computes `delayDays` server-side (reusing Phase 2's `utcDayDifference()`), and writes the `ProgramEvent` plus one matching `EVENT_RECORDED` `AuditEvent` in a single Prisma transaction — the only audit mutation this phase performs, with a redacted `afterValue` payload (structured facts and `hasReason`/`hasRawNotes` booleans, never full free text). Extends the Phase 2 `ServiceResult<T>`/`DomainError` strategy with a `FORBIDDEN` code rather than inventing a second error shape. See `docs/DECISIONS.md` for the full authorization and transaction design.
 
-## Request / data flow — the AI/approval/apply portion is planned (Phase 4–5), not yet implemented
+## Request / data flow — event intake and AI analysis implemented (Phase 3–4); approval/apply is planned (Phase 5)
 
 ```
 Program Manager submits supplier delay
   -> apps/web: event-entry server action (Zod-validated, server-side auth re-check)  [Phase 3 — done]
   -> packages/core: recordProgramEvent(input, actorUserId)                          [Phase 3 — done]
        - creates ProgramEvent + EVENT_RECORDED AuditEvent in one transaction
-  -> packages/core: buildAnalysisEvidence(eventId)                                   [Phase 2 — done, not yet called from apps/web]
-       - getImpactedRequirements / getImpactedMilestones / getDependencyChain
-       - getVerificationGaps / getRelatedDefects
-       - calculateScheduleExposure / calculateBudgetExposure
-       - assembles bounded, allowlisted evidence (record id + type + safe summary)
-  -> LLMProvider (mock in dev/CI, live optional) -> strict Zod-validated structured output
-       (exec summary, exposures, 3 mitigation options, assumptions, unknowns, confidence, source IDs)
-       on failure: 1 retry -> persist FAILED analysis + AuditEvent, schema never loosened
-  -> Analysis workspace UI -> Program Manager approves / rejects / requests revision
-  -> Decision + AuditEvent recorded -> apply-preview screen (old/new values) -> explicit confirm
-  -> DB transaction applies ProposedChanges (milestones/risks/budget/new actions) + AuditEvent
+
+Program Manager clicks "Analyze" on a recorded event
+  -> apps/web: analyzeEventAction server action (actor ID from session only)         [Phase 4 — done]
+  -> packages/core: runImpactAnalysis(eventId, actorUserId)                          [Phase 4 — done]
+       - re-verifies actor role from the database; only PROGRAM_MANAGER may proceed
+       - buildAnalysisEvidence(eventId)                                              [Phase 2 — done]
+       - buildModelInputProjection(evidence) -> validated, bounded ModelInputProjection
+       - per attempt (max 2): create PENDING ImpactAnalysis + ANALYSIS_STARTED AuditEvent
+         -> call LLMProvider.generateImpactAnalysis() OUTSIDE any DB transaction
+            (MockLLMProvider in dev/CI/tests; OpenAiImpactAnalysisProvider if AI_MODE=live)
+         -> structural validation (impactAnalysisOutputSchema, Zod)
+         -> semantic validation (source IDs allowlisted; scheduleExposureDays ==
+            ScheduleExposureResult.directDelayDays; budgetExposureAmount ==
+            BudgetExposureResult.totalDeterministicExposure)
+         -> on success: persist SUCCEEDED + exactly 3 MitigationOptions (1 recommended)
+            + SourceReferences + ANALYSIS_SUCCEEDED AuditEvent, in one transaction
+         -> on a retryable failure: persist FAILED + ANALYSIS_FAILED AuditEvent, retry
+            once with concise validation feedback; a configuration failure is never retried
+  -> apps/web: analysis workspace (/programs/edgelink-x/analyses/[id]) — every role can view
+  -> apps/web: readiness briefing (/programs/edgelink-x/briefings/[id]) — printable, read-only
+
+Decision + apply-preview + transactional ProposedChange apply -> Phase 5, not implemented
 ```
 
-The AI call and the approval/apply path are not wired up yet — event
-intake now works end-to-end and is auditable, but nothing yet analyzes a
-recorded event, proposes mitigation options, or applies a change. No
-`ImpactAnalysis`, `MitigationOption`, `ProposedChange`, or `Decision` row
-exists anywhere in the database as of Phase 3.
+Event intake and AI analysis both work end-to-end and are fully auditable.
+The approval/apply path is not wired up yet — a mitigation option is a
+proposal only. No `Decision` or `ProposedChange` row exists anywhere in the
+database as of Phase 4.
 
 ## Domain model — implemented (Phase 1)
 
@@ -109,23 +150,99 @@ with a local Postgres already on 5432), selected via `DATABASE_URL` vs
 `TEST_DATABASE_URL`. Every destructive operation (test reset, dev reseed)
 passes through the shared guard in `packages/core/src/db-safety.ts`.
 
-## AI — planned (Phase 4), not yet implemented
+## AI — implemented (Phase 4)
 
-`LLMProvider` interface with a mock implementation (deterministic, no API
-key, used in CI/demo) and an optional live implementation (single provider
-adapter, server-only secret). Prompts will live under
-`packages/core/src/ai/prompts`. The model will receive only validated,
-bounded evidence — never raw database dumps — and untrusted text (e.g.
-supplier notes) will be passed as clearly isolated data, never as
-instructions. None of this exists in the codebase yet.
+`packages/core/src/ai/`:
 
-## Observability — partially implemented
+```text
+provider.ts              LLMProvider / LLMProviderRequest / LLMProviderResponse
+errors.ts                AiConfigurationError, AiProviderError, safe error-category allowlist
+provider-factory.ts      resolveAiMode() (strict "mock"|"live"), createProviderFromEnv()
+mock-provider.ts         generateMockImpactAnalysis() (pure) + MockLLMProvider
+openai-provider.ts       OpenAiImpactAnalysisProvider (Responses API, live mode only)
+model-input.ts           buildModelInputProjection(), ModelInputProjection Zod schema, bounds
+output-schema.ts         impactAnalysisOutputSchema (the authoritative Zod output schema)
+output-validation.ts     validateImpactAnalysisSemantics() (source-ID + deterministic checks)
+orchestrator.ts          runImpactAnalysis() — authorization, attempts, retry, persistence
+logging.ts                logAnalysisEvent() — structured JSON, injectable sink
+prompts/                 impact-analysis-system.ts, impact-analysis-user.ts
+```
 
-Structured JSON logging, per-analysis trace IDs, and UI trace-ID surfacing
-are planned for Phase 4+, once there are analysis attempts to log. Today,
-the only "observability" is Next's own dev/build console output and the
-safe (credential-free) messages returned by the destructive-operation
-guard.
+**Model input.** `buildModelInputProjection(evidence: AnalysisEvidence)` never
+serializes the full `AnalysisEvidence` object — only structured event facts,
+deterministic results (impacted requirement/milestone IDs, schedule/budget
+exposure, verification gaps, related defects, risk scores, readiness score),
+the already-bounded evidence allowlist (`{ recordId, recordType, summary }`),
+and a separate `untrustedData: { reason, rawNotes }` object. Collections not
+already bounded by `EVIDENCE_LIMITS` (impacted requirements/milestones,
+verification gaps, related defects, risk scores, readiness factors,
+assumptions, unknowns) get their own explicit bounds
+(`MODEL_INPUT_LIMITS`, reusing `EVIDENCE_LIMITS.maxItemsPerRecordType`
+rather than inventing a second number) — every truncation records a warning
+in `unknowns` rather than silently dropping data, and ordering is always the
+producing service's own deterministic order. A final
+`checkModelInputSize()` byte-length check runs before every provider call.
+
+**Prompts.** The system prompt (`prompts/impact-analysis-system.ts`) states
+that all data is fictional, that `untrustedData` is data never instructions,
+that IDs/dates/costs must never be invented, that facts and assumptions must
+stay separated, and that exactly three mitigation options with exactly one
+recommendation are required. The user prompt
+(`prompts/impact-analysis-user.ts`) serializes only the validated
+`ModelInputProjection` — no interpolated prose wrapping individual untrusted
+fields. Neither prompt is ever logged in full.
+
+**Output schema and validation.** `impactAnalysisOutputSchema` is `.strict()`
+throughout (no extra keys, no optional fields — `nullable()` instead),
+requires a fixed 3-tuple of mitigation options with exactly one
+`isRecommended: true`, fixed-2-decimal monetary strings, and documented
+length/array limits. A second, semantic pass
+(`validateImpactAnalysisSemantics()`) checks what Zod alone cannot: every
+`sourceRecordIds` entry (top-level and per-option) must exist in the
+request's own evidence allowlist; `affectedRequirementIds`/
+`affectedMilestoneIds` must exist as `REQUIREMENT`/`MILESTONE` evidence;
+`scheduleExposureDays` must exactly equal
+`ScheduleExposureResult.directDelayDays`, and `budgetExposureAmount` must
+exactly equal `BudgetExposureResult.totalDeterministicExposure` — the
+persisted value is always the deterministic one, never the model's own
+copy of it, even when they agree (see `docs/DECISIONS.md`).
+
+**Providers.** `MockLLMProvider` (`AI_MODE=mock`, default for dev/CI/tests)
+wraps the pure `generateMockImpactAnalysis()`, which never invents a value
+not already present in the deterministic input. `OpenAiImpactAnalysisProvider`
+(`AI_MODE=live`) uses the official `openai` package's Responses API with
+strict JSON-schema structured output generated from the same authoritative
+Zod schema via `z.toJSONSchema()` (never a hand-duplicated schema),
+`store: false`, no streaming/tools/web-search/conversations. No automated
+test, smoke check, or CI step ever exercises this path.
+
+**Orchestration.** `runImpactAnalysis(eventId, actorUserId, options?)`
+re-verifies the actor's current database role (only `PROGRAM_MANAGER`,
+same pattern as `recordProgramEvent()`), builds evidence and a validated
+model input, then runs an attempt loop (max 2): create a `PENDING`
+`ImpactAnalysis` row and `ANALYSIS_STARTED` audit event, call the provider
+outside any transaction, run structural then semantic validation, and
+either persist a `SUCCEEDED` result (exactly 3 `MitigationOption` rows, one
+final transaction) or a `FAILED` one (safe error category and validation
+errors only — never a raw stack trace or provider payload). One
+`analysisRunId` per logical run links an attempt and its one retry; each
+attempt keeps its own `traceId`. Retryable failure categories (transient
+provider error, malformed JSON, schema violation, invalid source IDs,
+deterministic mismatch) get exactly one retry with concise validation
+feedback; a configuration failure (missing key/model) is never retried and
+creates no `ImpactAnalysis` row at all, since there was no real attempt to
+record.
+
+## Observability — implemented (Phase 4)
+
+`packages/core/src/ai/logging.ts`'s `logAnalysisEvent()` emits one line of
+structured JSON per lifecycle event (`analysis.started`, `.succeeded`,
+`.failed`, `.retrying`) with trace ID, analysis run ID, analysis ID,
+attempt, event ID, requesting user ID, AI mode, provider, model, duration,
+status, and safe error category — never an API key, token, prompt, raw
+provider output, full untrusted text, database URL, or credential. Takes an
+injectable sink so it's directly unit-testable. Trace IDs are surfaced in
+the analysis workspace (every attempt) and the readiness briefing.
 
 ## Deployment (MVP)
 

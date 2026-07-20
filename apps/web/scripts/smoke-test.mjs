@@ -55,6 +55,15 @@ const DEMO_ROLE = "PROGRAM_MANAGER";
 // role-based access differs, never to submit anything.
 const ENGINEERING_LEAD_EMAIL = "lead@missionthread.example";
 
+// The one seeded demonstration analysis (packages/core/prisma/seed.ts,
+// packages/core/src/seed/ids.ts) — fixed IDs, so this smoke test can assert
+// on them directly without querying the database itself. AI_MODE is always
+// "mock" wherever this script runs (see .env.test.example / ci.yml), so
+// nothing in this run ever makes a real, paid provider request — only page
+// views of the already-seeded fixture, never a fresh Analyze submission.
+const SEEDED_ANALYSIS_RUN_ID = "RUN-EVT-SUPPLIER-001";
+const SEEDED_ANALYSIS_TRACE_ID = "TRACE-ANALYSIS-EVT-SUPPLIER-001";
+
 let failureCount = 0;
 
 function check(description, condition) {
@@ -102,6 +111,21 @@ function checkRedirectToLogin(description, response) {
 function getTestIdText(html, testId) {
   const match = html.match(new RegExp(`data-testid="${testId}"[^>]*>([^<]*)<`));
   return match ? match[1].trim() : null;
+}
+
+/**
+ * Counts elements carrying a given data-testid attribute. Deliberately not
+ * a plain text-occurrence count: Next.js's App Router streams a serialized
+ * RSC "flight" payload alongside the rendered HTML for hydration, which
+ * re-embeds every rendered string a second time inside a <script> tag as
+ * escaped JSON (`\"like this\"`) — a bare `html.match(/some text/g)` count
+ * would therefore double-count everything. An exact, unescaped
+ * `data-testid="..."` attribute match only appears in the actual rendered
+ * markup, never inside that escaped payload, so this stays an accurate
+ * count of real DOM elements.
+ */
+function countTestId(html, testId) {
+  return (html.match(new RegExp(`data-testid="${testId}"`, "g")) ?? []).length;
 }
 
 /** Minimal cookie jar: tracks the latest value for each cookie name across
@@ -211,6 +235,18 @@ async function main() {
     });
     checkRedirectToLogin("GET /programs/edgelink-x/events/new", eventEntry);
 
+    const analysisUnauth = await fetch(
+      `${BASE_URL}/programs/edgelink-x/analyses/${SEEDED_ANALYSIS_RUN_ID}`,
+      { redirect: "manual" },
+    );
+    checkRedirectToLogin("GET /programs/edgelink-x/analyses/[id]", analysisUnauth);
+
+    const briefingUnauth = await fetch(
+      `${BASE_URL}/programs/edgelink-x/briefings/${SEEDED_ANALYSIS_RUN_ID}`,
+      { redirect: "manual" },
+    );
+    checkRedirectToLogin("GET /programs/edgelink-x/briefings/[id]", briefingUnauth);
+
     console.log("\nLogin page:");
     const loginPage = await fetch(`${BASE_URL}/login`);
     const loginHtml = await loginPage.text();
@@ -313,6 +349,52 @@ async function main() {
       auditHtml.includes("TRACE-EVT-SUPPLIER-001") && auditHtml.includes("EVT-SUPPLIER-001"),
     );
 
+    console.log("\nSeeded analysis workspace:");
+    const analysisPage = await fetch(
+      `${BASE_URL}/programs/edgelink-x/analyses/${SEEDED_ANALYSIS_RUN_ID}`,
+      { headers: { Cookie: jar.header() } },
+    );
+    const analysisHtml = await analysisPage.text();
+    check("GET /programs/edgelink-x/analyses/[id] returns 200", analysisPage.status === 200);
+    check(
+      "analysis workspace shows the seeded trace ID",
+      analysisHtml.includes(SEEDED_ANALYSIS_TRACE_ID),
+    );
+    check(
+      "analysis workspace shows exactly 3 mitigation option cards",
+      countTestId(analysisHtml, "mitigation-option") === 3,
+    );
+    check(
+      "analysis workspace marks exactly 1 option as recommended",
+      countTestId(analysisHtml, "mitigation-recommended-badge") === 1,
+    );
+    check(
+      "analysis workspace links to the readiness briefing",
+      analysisHtml.includes(`/programs/edgelink-x/briefings/${SEEDED_ANALYSIS_RUN_ID}`),
+    );
+
+    console.log("\nSeeded readiness briefing:");
+    const briefingPage = await fetch(
+      `${BASE_URL}/programs/edgelink-x/briefings/${SEEDED_ANALYSIS_RUN_ID}`,
+      { headers: { Cookie: jar.header() } },
+    );
+    const briefingHtml = await briefingPage.text();
+    check("GET /programs/edgelink-x/briefings/[id] returns 200", briefingPage.status === 200);
+    check("briefing shows the seeded trace ID", briefingHtml.includes(SEEDED_ANALYSIS_TRACE_ID));
+    check("briefing shows a confidence badge", briefingHtml.includes("MEDIUM"));
+    check(
+      "briefing shows assumptions and unknowns sections",
+      briefingHtml.includes("Assumptions") && briefingHtml.includes("Unknowns"),
+    );
+    check(
+      "briefing shows a source references section",
+      briefingHtml.includes("Source references") && briefingHtml.includes("EVT-SUPPLIER-001"),
+    );
+    check(
+      "briefing states the options are pending human review, not applied",
+      briefingHtml.includes("pending human Program Manager"),
+    );
+
     console.log("\nEvent-entry access (role-based):");
     const eventEntryAsPm = await fetch(`${BASE_URL}/programs/edgelink-x/events/new`, {
       headers: { Cookie: jar.header() },
@@ -340,6 +422,25 @@ async function main() {
     check(
       "Engineering Lead does not see a Record event link",
       dashboardAsLead.status === 200 && !dashboardAsLeadHtml.includes("Record event"),
+    );
+
+    console.log("\nAnalysis access (role-based):");
+    const analysisAsLead = await fetch(
+      `${BASE_URL}/programs/edgelink-x/analyses/${SEEDED_ANALYSIS_RUN_ID}`,
+      { headers: { Cookie: leadJar.header() } },
+    );
+    check("Engineering Lead can view the seeded analysis (200)", analysisAsLead.status === 200);
+    const programAsLead = await fetch(`${BASE_URL}/programs/edgelink-x`, {
+      headers: { Cookie: leadJar.header() },
+    });
+    const programAsLeadHtml = await programAsLead.text();
+    check(
+      "Engineering Lead does not see an Analyze control on the program overview",
+      programAsLead.status === 200 && !programAsLeadHtml.includes(">Analyze<"),
+    );
+    check(
+      "Program Manager does see an Analyze control on the program overview",
+      programHtml.includes(">Analyze<"),
     );
 
     console.log("\nSign-out:");

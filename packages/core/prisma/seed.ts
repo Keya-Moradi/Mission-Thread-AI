@@ -42,6 +42,10 @@ if (!process.env.DATABASE_URL) {
 import {
   AUDIT_EVENT_IDS,
   AUDIT_TRACE_IDS,
+  ANALYSIS_AUDIT_EVENT_IDS,
+  ANALYSIS_IDS,
+  ANALYSIS_RUN_IDS,
+  ANALYSIS_TRACE_IDS,
   BUDGET_IDS,
   COMPONENT_IDS,
   DEFECT_IDS,
@@ -50,12 +54,14 @@ import {
   DEPENDENCY_IDS,
   EVENT_IDS,
   MILESTONE_IDS,
+  MITIGATION_OPTION_IDS,
   PROGRAM_ID,
   REQUIREMENT_IDS,
   RISK_IDS,
   SUPPLIER_IDS,
   TEST_IDS,
 } from "../src/seed/ids";
+import { evidenceRecordTypeSchema } from "../src/record-types";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
@@ -860,6 +866,167 @@ async function seedAuditEvents(programManagerId: string) {
   }
 }
 
+// The one seeded demonstration AI impact analysis, for EVT-SUPPLIER-001.
+// Deliberately does NOT hand-author the analysis output: it calls the same
+// production buildAnalysisEvidence() -> buildModelInputProjection() ->
+// generateMockImpactAnalysis() pipeline runImpactAnalysis() uses at
+// runtime, then re-validates the result against the same production
+// impactAnalysisOutputSchema/validateImpactAnalysisSemantics() every real
+// attempt is checked against — so this fixture is proof the pipeline
+// produces a genuinely valid result, not a separate, hand-maintained shape
+// that could silently drift from what the real code actually does. Persists
+// SUCCEEDED directly (status PENDING -> SUCCEEDED is otherwise only ever
+// observed transiently during a live runImpactAnalysis() call) since a
+// fresh seed should demonstrate a completed analysis, not re-run the
+// pipeline's own transient bookkeeping. Contains zero Decision/
+// ProposedChange rows — Phase 4 never creates those; that's Phase 5.
+async function seedImpactAnalysis(programManagerId: string) {
+  // Dynamic imports, not static ones: buildAnalysisEvidence()/../src/ai
+  // transitively import ../src/db.ts, which constructs its module-level
+  // PrismaClient from process.env.DATABASE_URL at import-evaluation time.
+  // Static ES module imports are hoisted and evaluated before this file's
+  // own top-level dotenv-loading code above runs (regardless of source
+  // order), so a static import here would construct that client before
+  // DATABASE_URL is set. A dynamic import() only evaluates at the point
+  // it's actually awaited — by which time main() (and therefore the
+  // dotenv load above) has already run.
+  const { buildAnalysisEvidence } = await import("../src/analysis/evidence");
+  const {
+    buildModelInputProjection,
+    generateMockImpactAnalysis,
+    impactAnalysisOutputSchema,
+    validateImpactAnalysisSemantics,
+  } = await import("../src/ai");
+
+  const evidenceResult = await buildAnalysisEvidence(EVENT_IDS.supplierDelay);
+  if (!evidenceResult.ok) {
+    throw new Error(`Failed to build seed analysis evidence: ${evidenceResult.error.message}`);
+  }
+  const modelInput = buildModelInputProjection(evidenceResult.data);
+  const rawOutput = generateMockImpactAnalysis(modelInput);
+
+  const structural = impactAnalysisOutputSchema.safeParse(rawOutput);
+  if (!structural.success) {
+    throw new Error(
+      `Seed analysis output failed the production output schema: ${structural.error.message}`,
+    );
+  }
+  const output = structural.data;
+  const semantic = validateImpactAnalysisSemantics(output, modelInput);
+  if (!semantic.valid) {
+    throw new Error(
+      `Seed analysis output failed semantic validation: ${semantic.errors.join("; ")}`,
+    );
+  }
+
+  const recordTypeById = new Map(
+    modelInput.evidenceAllowlist.map((item) => [item.recordId, item.recordType]),
+  );
+  const summaryById = new Map(
+    modelInput.evidenceAllowlist.map((item) => [item.recordId, item.summary]),
+  );
+  const citedIds = new Set<string>([
+    ...output.sourceRecordIds,
+    ...output.mitigationOptions.flatMap((option) => option.sourceRecordIds),
+  ]);
+
+  const traceId = ANALYSIS_TRACE_IDS.supplierDelay;
+  const startedAt = new Date("2026-07-17T12:30:00.000Z");
+  const succeededAt = new Date("2026-07-17T12:30:01.000Z");
+
+  await prisma.impactAnalysis.create({
+    data: {
+      id: ANALYSIS_IDS.supplierDelay,
+      programEventId: EVENT_IDS.supplierDelay,
+      analysisRunId: ANALYSIS_RUN_IDS.supplierDelay,
+      requestedById: programManagerId,
+      traceId,
+      status: "SUCCEEDED",
+      aiMode: "mock",
+      provider: "mock",
+      model: "mock-deterministic-v1",
+      attempt: 1,
+      executiveSummary: output.executiveSummary,
+      missionImpact: output.missionImpact,
+      scheduleExposureDays: output.scheduleExposureDays,
+      budgetExposureAmount: output.budgetExposureAmount,
+      verificationGaps: output.verificationGaps,
+      assumptions: output.assumptions,
+      unknowns: output.unknowns,
+      confidence: output.confidence,
+      validationPassed: true,
+      durationMs: 5,
+      createdAt: succeededAt,
+    },
+  });
+
+  // Deterministic without a pre-enumerated ID list: derived directly from
+  // each cited record's own (recordType, recordId), which is itself already
+  // fully deterministic seed data — see docs/DECISIONS.md.
+  for (const recordId of citedIds) {
+    const recordType = recordTypeById.get(recordId);
+    const parsedType = evidenceRecordTypeSchema.safeParse(recordType);
+    if (!parsedType.success) continue;
+    await prisma.sourceReference.create({
+      data: {
+        id: `SRC-EVT-SUPPLIER-001-${parsedType.data}-${recordId}`,
+        impactAnalysisId: ANALYSIS_IDS.supplierDelay,
+        recordId,
+        recordType: parsedType.data,
+        summary: summaryById.get(recordId) ?? "",
+        createdAt: succeededAt,
+      },
+    });
+  }
+
+  for (const [index, option] of output.mitigationOptions.entries()) {
+    await prisma.mitigationOption.create({
+      data: {
+        id: MITIGATION_OPTION_IDS.supplierDelay[index],
+        impactAnalysisId: ANALYSIS_IDS.supplierDelay,
+        optionIndex: index,
+        title: option.title,
+        description: option.description,
+        tradeoffs: option.tradeoffs,
+        costImpact: option.costImpact,
+        scheduleImpact: option.scheduleImpact,
+        isRecommended: option.isRecommended,
+      },
+    });
+  }
+
+  await prisma.auditEvent.create({
+    data: {
+      id: ANALYSIS_AUDIT_EVENT_IDS.started,
+      traceId,
+      createdAt: startedAt,
+      actorUserId: programManagerId,
+      actorType: "USER",
+      action: "ANALYSIS_STARTED",
+      targetRecordId: ANALYSIS_IDS.supplierDelay,
+      targetRecordType: "IMPACT_ANALYSIS",
+      afterValue: {
+        eventId: EVENT_IDS.supplierDelay,
+        analysisRunId: ANALYSIS_RUN_IDS.supplierDelay,
+        attempt: 1,
+      },
+    },
+  });
+  await prisma.auditEvent.create({
+    data: {
+      id: ANALYSIS_AUDIT_EVENT_IDS.succeeded,
+      traceId,
+      createdAt: succeededAt,
+      actorUserId: programManagerId,
+      actorType: "USER",
+      action: "ANALYSIS_SUCCEEDED",
+      targetRecordId: ANALYSIS_IDS.supplierDelay,
+      targetRecordType: "IMPACT_ANALYSIS",
+      afterValue: { eventId: EVENT_IDS.supplierDelay, confidence: output.confidence },
+    },
+  });
+}
+
 async function main() {
   console.log("Clearing existing data...");
   await clearExistingData(seedConfiguration);
@@ -899,6 +1066,9 @@ async function main() {
 
   console.log("Seeding audit events...");
   await seedAuditEvents(programManager.id);
+
+  console.log("Seeding demonstration impact analysis...");
+  await seedImpactAnalysis(programManager.id);
 
   console.log("Seed complete.");
 }

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { prisma, PROGRAM_ID, Role, getVerificationGaps } from "@missionthread/core";
 import { requireSession } from "@/lib/auth-helpers";
 import { StatusBadge } from "@/components/status-badge";
+import { AnalyzeButton } from "./analyze-button";
 
 async function loadProgramOverviewData() {
   const [
@@ -148,7 +149,7 @@ function formatMoney(amount: unknown, currency: string): string {
 export default async function ProgramOverviewPage({
   searchParams,
 }: {
-  searchParams: Promise<{ eventRecorded?: string }>;
+  searchParams: Promise<{ eventRecorded?: string; analysisError?: string }>;
 }) {
   const [session, data, resolvedSearchParams] = await Promise.all([
     requireSession(),
@@ -169,6 +170,15 @@ export default async function ProgramOverviewPage({
         >
           Event <span className="font-mono">{resolvedSearchParams.eventRecorded}</span> recorded
           successfully.
+        </div>
+      )}
+
+      {resolvedSearchParams.analysisError && (
+        <div
+          role="alert"
+          className="mb-4 rounded-md border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger"
+        >
+          {resolvedSearchParams.analysisError}
         </div>
       )}
 
@@ -355,9 +365,12 @@ export default async function ProgramOverviewPage({
                   <span className="font-medium text-foreground">
                     {event.eventType.replaceAll("_", " ")}
                   </span>
-                  <time className="text-xs text-muted" dateTime={event.createdAt.toISOString()}>
-                    {formatDate(event.createdAt)}
-                  </time>
+                  <div className="flex items-center gap-3">
+                    <time className="text-xs text-muted" dateTime={event.createdAt.toISOString()}>
+                      {formatDate(event.createdAt)}
+                    </time>
+                    {isProgramManager && <AnalyzeButton eventId={event.id} />}
+                  </div>
                 </div>
                 <div className="mt-1 text-xs text-muted">
                   {event.component && <>Component: {event.component.name} </>}
