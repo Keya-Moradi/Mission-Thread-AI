@@ -21,14 +21,45 @@ export const OUTPUT_LIMITS = {
 } as const;
 
 /**
- * Fixed-2-decimal monetary string ("480000.00"), matching how
- * calculateBudgetExposure() (packages/core/src/analysis/budget.ts) already
- * serializes Prisma.Decimal totals — never a bare number (float rounding)
- * and never a currency-symbol-prefixed string.
+ * PostgreSQL `Decimal(12, 2)` (see `MitigationOption.costImpact` and
+ * `ImpactAnalysis.budgetExposureAmount` in schema.prisma) permits at most 10
+ * digits before the decimal point plus the 2 after it — 12 significant
+ * digits total. A structurally "valid-looking" monetary string with more
+ * integer digits than that would pass a looser regex but fail at Prisma
+ * persistence time, after the provider response has already been treated as
+ * successful. This schema is the database-safe boundary itself, not merely
+ * documentation of it — see docs/DECISIONS.md, "Persistence-boundary
+ * repair: database-safe output constraints".
  */
-const moneyStringSchema = z
+export const MAX_DECIMAL_12_2_INTEGER_DIGITS = 10;
+
+/**
+ * Fixed-2-decimal, non-negative monetary string ("480000.00") bounded to
+ * fit `Decimal(12, 2)` — never a bare JS number (binary-float rounding),
+ * never a currency-symbol-prefixed string, never more integer digits than
+ * the column can actually store. Used for every monetary field this schema
+ * persists directly: `budgetExposureAmount` and each mitigation option's
+ * `costImpact`.
+ */
+export const persistedMoneyStringSchema = z
   .string()
-  .regex(/^\d+\.\d{2}$/, 'must be a fixed two-decimal monetary string, e.g. "480000.00"');
+  .regex(
+    /^\d{1,10}\.\d{2}$/,
+    "must be a non-negative fixed two-decimal value within Decimal(12,2)",
+  );
+
+/**
+ * Documented business range for a mitigation option's *proposed* schedule
+ * impact — unlike `scheduleExposureDays` (which must exactly equal an
+ * already-computed deterministic value, enforced in output-validation.ts),
+ * this is a model-proposed number with no deterministic counterpart to
+ * check it against, so it needs its own explicit bound. ±3650 days (10
+ * years) comfortably covers any real proposed acceleration or delay for
+ * this program while staying far inside Postgres `Int` range, and — more
+ * importantly — inside any range a human reviewer could sensibly evaluate.
+ */
+export const MIN_MITIGATION_SCHEDULE_IMPACT_DAYS = -3650;
+export const MAX_MITIGATION_SCHEDULE_IMPACT_DAYS = 3650;
 
 const nonEmptyTrimmedString = (max: number) => z.string().trim().min(1).max(max);
 
@@ -37,8 +68,13 @@ const mitigationOptionOutputSchema = z
     title: nonEmptyTrimmedString(OUTPUT_LIMITS.maxOptionTitleLength),
     description: nonEmptyTrimmedString(OUTPUT_LIMITS.maxOptionDescriptionLength),
     tradeoffs: nonEmptyTrimmedString(OUTPUT_LIMITS.maxOptionTradeoffsLength),
-    costImpact: moneyStringSchema.nullable(),
-    scheduleImpact: z.number().int().nullable(),
+    costImpact: persistedMoneyStringSchema.nullable(),
+    scheduleImpact: z
+      .number()
+      .int()
+      .min(MIN_MITIGATION_SCHEDULE_IMPACT_DAYS)
+      .max(MAX_MITIGATION_SCHEDULE_IMPACT_DAYS)
+      .nullable(),
     isRecommended: z.boolean(),
     sourceRecordIds: z
       .array(z.string().min(1))
@@ -71,7 +107,7 @@ export const impactAnalysisOutputSchema = z
     executiveSummary: nonEmptyTrimmedString(OUTPUT_LIMITS.maxExecutiveSummaryLength),
     missionImpact: nonEmptyTrimmedString(OUTPUT_LIMITS.maxMissionImpactLength),
     scheduleExposureDays: z.number().int().nullable(),
-    budgetExposureAmount: moneyStringSchema.nullable(),
+    budgetExposureAmount: persistedMoneyStringSchema.nullable(),
     affectedRequirementIds: z.array(z.string().min(1)).max(OUTPUT_LIMITS.maxAffectedIds),
     affectedMilestoneIds: z.array(z.string().min(1)).max(OUTPUT_LIMITS.maxAffectedIds),
     verificationGaps: z.array(verificationGapOutputSchema).max(OUTPUT_LIMITS.maxVerificationGaps),

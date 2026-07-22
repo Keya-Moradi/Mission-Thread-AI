@@ -12,7 +12,11 @@ import {
   type ModelInputProjection,
 } from "./model-input";
 import { IMPACT_ANALYSIS_SYSTEM_PROMPT } from "./prompts/impact-analysis-system";
-import { impactAnalysisOutputSchema, summarizeOutputSchemaErrors } from "./output-schema";
+import {
+  impactAnalysisOutputSchema,
+  summarizeOutputSchemaErrors,
+  type ImpactAnalysisOutput,
+} from "./output-schema";
 import { validateImpactAnalysisSemantics } from "./output-validation";
 import { classifyProviderError, isRetryableCategory, type AiErrorCategory } from "./errors";
 import { logAnalysisEvent } from "./logging";
@@ -20,7 +24,7 @@ import {
   buildAttemptSourceReferenceSnapshot,
   buildSucceededImpactAnalysisData,
 } from "./attempt-persistence";
-import type { LLMProvider } from "./provider";
+import type { LLMProvider, LLMProviderRequest } from "./provider";
 
 const MAX_ATTEMPTS = 2;
 
@@ -33,16 +37,17 @@ export interface RunImpactAnalysisResult {
   errorCategory?: AiErrorCategory;
 }
 
-/**
- * Persists the complete evidence snapshot an attempt was built from —
- * every allowlisted record, wasCited:false — plus the PENDING
- * ImpactAnalysis row and its ANALYSIS_STARTED audit event, all in one
- * transaction, before the provider is ever called. See
- * docs/DECISIONS.md, "Phase 4 correction: complete attempt-evidence
- * persistence" — a failed attempt's rows are never touched again after
- * this, so they correctly retain the full supplied snapshot.
- */
-async function persistPendingAttempt(params: {
+// ---------------------------------------------------------------------------
+// Persistence — isolated behind a narrow interface (AnalysisPersistence)
+// specifically so tests can make one stage fail in isolation without a
+// brittle global Prisma mock. The production default (defaultAnalysisPersistence)
+// is the only implementation ever wired into the web app; runImpactAnalysis()'s
+// options.persistence override exists purely for tests — apps/web never
+// passes it. See docs/DECISIONS.md, "Persistence-boundary repair: directly
+// testable persistence injection".
+// ---------------------------------------------------------------------------
+
+export interface PersistPendingAttemptParams {
   analysisId: string;
   programEventId: string;
   analysisRunId: string;
@@ -52,7 +57,45 @@ async function persistPendingAttempt(params: {
   aiMode: string;
   providerName: string;
   modelInput: ModelInputProjection;
-}): Promise<void> {
+}
+
+export interface PersistSucceededAttemptParams {
+  analysisId: string;
+  traceId: string;
+  actorUserId: string;
+  eventId: string;
+  durationMs: number;
+  providerModel?: string;
+  output: ImpactAnalysisOutput;
+  modelInput: ModelInputProjection;
+}
+
+export interface PersistFailedAttemptParams {
+  analysisId: string;
+  category: AiErrorCategory;
+  durationMs: number;
+  validationErrors: string[] | null;
+  providerModel?: string;
+}
+
+export interface AnalysisPersistence {
+  persistPendingAttempt(params: PersistPendingAttemptParams): Promise<void>;
+  persistSucceededAttempt(params: PersistSucceededAttemptParams): Promise<void>;
+  persistFailedAttempt(params: PersistFailedAttemptParams): Promise<void>;
+}
+
+/**
+ * Persists the complete evidence snapshot an attempt was built from —
+ * every allowlisted record, wasCited:false — plus the PENDING
+ * ImpactAnalysis row and its ANALYSIS_STARTED audit event, all in one
+ * transaction, before the provider is ever called. See
+ * docs/DECISIONS.md, "Phase 4 correction: complete attempt-evidence
+ * persistence" — a failed attempt's rows are never touched again after
+ * this, so they correctly retain the full supplied snapshot. If this
+ * transaction throws, Prisma rolls back all three writes atomically — no
+ * partial attempt is ever left behind for the caller to mistake as real.
+ */
+async function persistPendingAttempt(params: PersistPendingAttemptParams): Promise<void> {
   const {
     analysisId,
     programEventId,
@@ -109,13 +152,7 @@ async function persistPendingAttempt(params: {
   });
 }
 
-async function persistFailedAttempt(params: {
-  analysisId: string;
-  category: AiErrorCategory;
-  durationMs: number;
-  validationErrors: string[] | null;
-  providerModel?: string;
-}): Promise<void> {
+async function persistFailedAttempt(params: PersistFailedAttemptParams): Promise<void> {
   const { analysisId, category, durationMs, validationErrors, providerModel } = params;
   await prisma.impactAnalysis.update({
     where: { id: analysisId },
@@ -137,18 +174,13 @@ async function persistFailedAttempt(params: {
  * cited subset of the already-persisted SourceReference rows with citation
  * metadata (never re-creates them — they exist from persistPendingAttempt),
  * creates exactly 3 MitigationOption rows, and the ANALYSIS_SUCCEEDED audit
- * event.
+ * event. If this transaction throws partway through, Prisma rolls it back
+ * entirely — zero MitigationOption rows ever survive a failed success
+ * transaction, and the SourceReference rows persisted by
+ * persistPendingAttempt are untouched (they live in an already-committed,
+ * earlier transaction).
  */
-async function persistSucceededAttempt(params: {
-  analysisId: string;
-  traceId: string;
-  actorUserId: string;
-  eventId: string;
-  durationMs: number;
-  providerModel?: string;
-  output: import("./output-schema").ImpactAnalysisOutput;
-  modelInput: ModelInputProjection;
-}): Promise<void> {
+async function persistSucceededAttempt(params: PersistSucceededAttemptParams): Promise<void> {
   const {
     analysisId,
     traceId,
@@ -234,6 +266,200 @@ async function persistSucceededAttempt(params: {
   });
 }
 
+/** The only persistence implementation ever wired into the web app. */
+export const defaultAnalysisPersistence: AnalysisPersistence = {
+  persistPendingAttempt,
+  persistSucceededAttempt,
+  persistFailedAttempt,
+};
+
+// ---------------------------------------------------------------------------
+// Provider stage — invocation, response parsing, structural validation, and
+// semantic validation, isolated from persistence. The try/catch here covers
+// ONLY the provider call itself (and any provider-originated parsing error
+// thrown from inside it, e.g. AiProviderError("...", "MALFORMED_JSON") from
+// openai-provider.ts) — structural/semantic validation never throw (they use
+// safeParse and return a result object), so nothing downstream of the
+// provider call can be miscategorized as a provider failure. See
+// docs/DECISIONS.md, "Persistence-boundary repair: provider vs. persistence
+// failure separation".
+// ---------------------------------------------------------------------------
+
+type AttemptOutcome =
+  | { kind: "provider-failure"; category: AiErrorCategory; durationMs: number }
+  | {
+      kind: "validation-failure";
+      category: "INVALID_OUTPUT_SCHEMA" | "SEMANTIC_VALIDATION_FAILED";
+      errors: string[];
+      durationMs: number;
+      providerModel?: string;
+    }
+  | { kind: "success"; output: ImpactAnalysisOutput; durationMs: number; providerModel?: string };
+
+async function runProviderAndValidate(
+  provider: LLMProvider,
+  request: LLMProviderRequest,
+  modelInput: ModelInputProjection,
+): Promise<AttemptOutcome> {
+  const startedAt = Date.now();
+
+  // STAGE: provider invocation (the only stage this try/catch covers).
+  let rawOutput: unknown;
+  let providerModel: string | undefined;
+  let durationMs: number;
+  try {
+    const response = await provider.generateImpactAnalysis(request);
+    rawOutput = response.rawOutput;
+    providerModel = response.model;
+    durationMs = response.durationMs;
+  } catch (error) {
+    return {
+      kind: "provider-failure",
+      category: classifyProviderError(error),
+      durationMs: Date.now() - startedAt,
+    };
+  }
+
+  // STAGE: structural validation — outside the provider try/catch; safeParse
+  // never throws.
+  const structural = impactAnalysisOutputSchema.safeParse(rawOutput);
+  if (!structural.success) {
+    return {
+      kind: "validation-failure",
+      category: "INVALID_OUTPUT_SCHEMA",
+      errors: summarizeOutputSchemaErrors(structural.error),
+      durationMs,
+      providerModel,
+    };
+  }
+
+  // STAGE: semantic validation — also outside the provider try/catch.
+  const semantic = validateImpactAnalysisSemantics(structural.data, modelInput);
+  if (!semantic.valid) {
+    return {
+      kind: "validation-failure",
+      category: "SEMANTIC_VALIDATION_FAILED",
+      errors: semantic.errors,
+      durationMs,
+      providerModel,
+    };
+  }
+
+  return { kind: "success", output: structural.data, durationMs, providerModel };
+}
+
+// ---------------------------------------------------------------------------
+// Safe infrastructure-failure responses — used whenever persistence itself
+// (not the provider, not validation) is what failed. Never reads or forwards
+// the triggering error's message: the caught error is always discarded
+// entirely, never logged, persisted, or included in a returned message —
+// only these fixed, safe strings are ever surfaced.
+// ---------------------------------------------------------------------------
+
+function safeInfrastructureFailure(): ServiceResult<RunImpactAnalysisResult> {
+  return validationError(
+    "An internal error prevented processing this analysis attempt. Please try again.",
+  );
+}
+
+/**
+ * The provider already returned a structurally and semantically valid
+ * output, but persistSucceededAttempt() failed (persistSucceededAttempt's
+ * own transaction has already rolled back — zero MitigationOption rows, no
+ * partial success state). Never calls the provider again and never emits
+ * analysis.retrying: a persistence failure has nothing to do with whether
+ * the provider's response was good, and retrying would waste a second,
+ * identical provider call for a response that was already correct. Attempts
+ * to record FAILED/PERSISTENCE_FAILURE through the same persistence
+ * interface — a separate call from the one that just failed, on the theory
+ * that a transient write failure need not repeat on the very next write —
+ * and only creates the ANALYSIS_FAILED audit event if that succeeds. If
+ * even that fails, persistence is clearly unavailable, so this returns a
+ * generic infrastructure failure rather than fabricating a "provider
+ * failed" story or a false claim that FAILED was recorded.
+ */
+async function recordPersistenceFailureAfterValidOutput(params: {
+  persistence: AnalysisPersistence;
+  analysisId: string;
+  traceId: string;
+  actorUserId: string;
+  eventId: string;
+  analysisRunId: string;
+  attempt: number;
+  durationMs: number;
+  providerModel?: string;
+  aiMode: string;
+  providerName: string;
+}): Promise<ServiceResult<RunImpactAnalysisResult>> {
+  const {
+    persistence,
+    analysisId,
+    traceId,
+    actorUserId,
+    eventId,
+    analysisRunId,
+    attempt,
+    durationMs,
+    providerModel,
+    aiMode,
+    providerName,
+  } = params;
+  const category: AiErrorCategory = "PERSISTENCE_FAILURE";
+
+  try {
+    await persistence.persistFailedAttempt({
+      analysisId,
+      category,
+      durationMs,
+      validationErrors: null,
+      providerModel,
+    });
+  } catch {
+    return safeInfrastructureFailure();
+  }
+
+  try {
+    await prisma.auditEvent.create({
+      data: {
+        traceId,
+        actorUserId,
+        actorType: "USER",
+        action: "ANALYSIS_FAILED",
+        targetRecordId: analysisId,
+        targetRecordType: "IMPACT_ANALYSIS",
+        afterValue: { eventId, analysisRunId, attempt, errorCategory: category },
+      },
+    });
+  } catch {
+    // Best-effort — the FAILED status itself was already durably recorded
+    // above; an audit-write hiccup on top of that doesn't change the
+    // outcome being reported.
+  }
+
+  logAnalysisEvent("analysis.failed", {
+    traceId,
+    analysisRunId,
+    analysisId,
+    attempt,
+    eventId,
+    requestedById: actorUserId,
+    aiMode,
+    provider: providerName,
+    status: "FAILED",
+    validationPassed: false,
+    errorCategory: category,
+  });
+
+  return ok({
+    analysisRunId,
+    status: "FAILED",
+    finalAnalysisId: analysisId,
+    finalTraceId: traceId,
+    attempts: attempt,
+    errorCategory: category,
+  });
+}
+
 /**
  * The Phase 4 orchestration service: authorizes the actor, builds bounded
  * deterministic evidence and a validated model-input projection, then runs
@@ -244,11 +470,14 @@ async function persistSucceededAttempt(params: {
  * Creates zero Decision/ProposedChange rows; this is Phase 4 only (analysis
  * + mitigation options), never Phase 5's approval/apply workflow. See
  * docs/DECISIONS.md, "Phase 4 orchestration".
+ *
+ * `options.persistence` is a test-only override point (see
+ * AnalysisPersistence above) — apps/web never supplies it.
  */
 export async function runImpactAnalysis(
   eventId: string,
   actorUserId: string,
-  options?: { provider?: LLMProvider },
+  options?: { provider?: LLMProvider; persistence?: Partial<AnalysisPersistence> },
 ): Promise<ServiceResult<RunImpactAnalysisResult>> {
   if (!actorUserId || typeof actorUserId !== "string") {
     return forbidden("Invalid session.");
@@ -324,6 +553,12 @@ export async function runImpactAnalysis(
   }
   const aiMode = process.env.AI_MODE ?? "unknown";
 
+  // Test-only override point — production always uses defaultAnalysisPersistence.
+  const persistence: AnalysisPersistence = {
+    ...defaultAnalysisPersistence,
+    ...options?.persistence,
+  };
+
   const analysisRunId = `RUN-${randomUUID()}`;
   let validationFeedback: string[] | undefined;
 
@@ -331,17 +566,26 @@ export async function runImpactAnalysis(
     const traceId = randomUUID();
     const analysisId = `IA-${randomUUID()}`;
 
-    await persistPendingAttempt({
-      analysisId,
-      programEventId: event.id,
-      analysisRunId,
-      requestedById: actor.id,
-      traceId,
-      attempt,
-      aiMode,
-      providerName: provider.name,
-      modelInput,
-    });
+    // STAGE: pending-attempt persistence. Never provider-related — a
+    // failure here must never be classified via classifyProviderError(),
+    // must never trigger a provider call, and must never look like a
+    // completed attempt (persistPendingAttempt's transaction guarantees
+    // that on failure, none of its three writes survive).
+    try {
+      await persistence.persistPendingAttempt({
+        analysisId,
+        programEventId: event.id,
+        analysisRunId,
+        requestedById: actor.id,
+        traceId,
+        attempt,
+        aiMode,
+        providerName: provider.name,
+        modelInput,
+      });
+    } catch {
+      return safeInfrastructureFailure();
+    }
 
     logAnalysisEvent("analysis.started", {
       traceId,
@@ -354,97 +598,107 @@ export async function runImpactAnalysis(
       provider: provider.name,
     });
 
-    const startedAt = Date.now();
-    let category: AiErrorCategory = "TRANSIENT_PROVIDER_FAILURE";
-    let safeErrors: string[] | null = null;
-    let providerModel: string | undefined;
-
-    try {
-      const response = await provider.generateImpactAnalysis({
+    const outcome = await runProviderAndValidate(
+      provider,
+      {
         traceId,
         analysisRunId,
         attempt,
         systemPrompt: IMPACT_ANALYSIS_SYSTEM_PROMPT,
         modelInput,
         validationFeedback,
-      });
-      providerModel = response.model;
-      const durationMs = response.durationMs;
+      },
+      modelInput,
+    );
 
-      const structural = impactAnalysisOutputSchema.safeParse(response.rawOutput);
-      if (!structural.success) {
-        category = "INVALID_OUTPUT_SCHEMA";
-        safeErrors = summarizeOutputSchemaErrors(structural.error);
-      } else {
-        const semantic = validateImpactAnalysisSemantics(structural.data, modelInput);
-        if (!semantic.valid) {
-          category = "SEMANTIC_VALIDATION_FAILED";
-          safeErrors = semantic.errors;
-        } else {
-          await persistSucceededAttempt({
-            analysisId,
-            traceId,
-            actorUserId: actor.id,
-            eventId: event.id,
-            durationMs,
-            providerModel,
-            output: structural.data,
-            modelInput,
-          });
-          logAnalysisEvent("analysis.succeeded", {
-            traceId,
-            analysisRunId,
-            analysisId,
-            attempt,
-            eventId: event.id,
-            requestedById: actor.id,
-            aiMode,
-            provider: provider.name,
-            model: providerModel,
-            durationMs,
-            status: "SUCCEEDED",
-            validationPassed: true,
-          });
-          return ok({
-            analysisRunId,
-            status: "SUCCEEDED",
-            finalAnalysisId: analysisId,
-            finalTraceId: traceId,
-            attempts: attempt,
-          });
-        }
+    if (outcome.kind === "success") {
+      // STAGE: success persistence — its own try/catch, entirely separate
+      // from the provider stage above. A failure here is never retried and
+      // never re-invokes the provider.
+      try {
+        await persistence.persistSucceededAttempt({
+          analysisId,
+          traceId,
+          actorUserId: actor.id,
+          eventId: event.id,
+          durationMs: outcome.durationMs,
+          providerModel: outcome.providerModel,
+          output: outcome.output,
+          modelInput,
+        });
+      } catch {
+        return recordPersistenceFailureAfterValidOutput({
+          persistence,
+          analysisId,
+          traceId,
+          actorUserId: actor.id,
+          eventId: event.id,
+          analysisRunId,
+          attempt,
+          durationMs: outcome.durationMs,
+          providerModel: outcome.providerModel,
+          aiMode,
+          providerName: provider.name,
+        });
       }
 
-      await persistFailedAttempt({
+      logAnalysisEvent("analysis.succeeded", {
+        traceId,
+        analysisRunId,
         analysisId,
-        category,
-        durationMs,
-        validationErrors: safeErrors,
-        providerModel,
+        attempt,
+        eventId: event.id,
+        requestedById: actor.id,
+        aiMode,
+        provider: provider.name,
+        model: outcome.providerModel,
+        durationMs: outcome.durationMs,
+        status: "SUCCEEDED",
+        validationPassed: true,
       });
-    } catch (error) {
-      const durationMs = Date.now() - startedAt;
-      category = classifyProviderError(error);
-      await persistFailedAttempt({
-        analysisId,
-        category,
-        durationMs,
-        validationErrors: safeErrors,
-        providerModel,
+      return ok({
+        analysisRunId,
+        status: "SUCCEEDED",
+        finalAnalysisId: analysisId,
+        finalTraceId: traceId,
+        attempts: attempt,
       });
     }
 
-    await prisma.auditEvent.create({
-      data: {
-        traceId,
-        actorUserId: actor.id,
-        actorType: "USER",
-        action: "ANALYSIS_FAILED",
-        targetRecordId: analysisId,
-        targetRecordType: "IMPACT_ANALYSIS",
-        afterValue: { eventId: event.id, analysisRunId, attempt, errorCategory: category },
-      },
-    });
+    // outcome.kind is "provider-failure" | "validation-failure" here.
+    const category = outcome.category;
+    const safeErrors = outcome.kind === "validation-failure" ? outcome.errors : null;
+    const providerModel = outcome.kind === "validation-failure" ? outcome.providerModel : undefined;
+    const durationMs = outcome.durationMs;
+
+    try {
+      await persistence.persistFailedAttempt({
+        analysisId,
+        category,
+        durationMs,
+        validationErrors: safeErrors,
+        providerModel,
+      });
+    } catch {
+      return safeInfrastructureFailure();
+    }
+
+    try {
+      await prisma.auditEvent.create({
+        data: {
+          traceId,
+          actorUserId: actor.id,
+          actorType: "USER",
+          action: "ANALYSIS_FAILED",
+          targetRecordId: analysisId,
+          targetRecordType: "IMPACT_ANALYSIS",
+          afterValue: { eventId: event.id, analysisRunId, attempt, errorCategory: category },
+        },
+      });
+    } catch {
+      // Best-effort — the FAILED status itself was already durably
+      // recorded above.
+    }
 
     logAnalysisEvent("analysis.failed", {
       traceId,

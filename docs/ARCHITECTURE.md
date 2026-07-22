@@ -224,6 +224,22 @@ exactly equal `BudgetExposureResult.totalDeterministicExposure` — the
 persisted value is always the deterministic one, never the model's own
 copy of it, even when they agree (see `docs/DECISIONS.md`).
 
+**Database-safe output constraints.** Every monetary field
+(`budgetExposureAmount`, each mitigation option's `costImpact`) uses
+`persistedMoneyStringSchema` (`/^\d{1,10}\.\d{2}$/`, exported alongside
+`MAX_DECIMAL_12_2_INTEGER_DIGITS = 10`) — bounded to fit
+`Decimal(12, 2)`'s actual 10-integer-digit capacity, not just "any number
+of digits plus two decimals." Each mitigation option's `scheduleImpact`
+(a model-proposed figure with no deterministic counterpart to check it
+against, unlike `scheduleExposureDays`) is bounded to
+`MIN_MITIGATION_SCHEDULE_IMPACT_DAYS`/`MAX_MITIGATION_SCHEDULE_IMPACT_DAYS`
+(±3650 days, ±10 years). Schema validation exists specifically so a
+structurally-and-semantically "valid" response can never still fail at
+the actual Prisma write — matching the schema to the persistence-column
+limits, not just to what looks reasonable, is what closes that gap (see
+`docs/DECISIONS.md`, "Persistence-boundary repair: database-safe output
+constraints").
+
 **Provider-facing JSON Schema.** `openai-schema.ts`'s
 `buildOpenAiImpactAnalysisJsonSchema()` generates a JSON Schema from
 `impactAnalysisOutputSchema` via `z.toJSONSchema()` — still the single
@@ -265,24 +281,50 @@ re-verifies the actor's current database role (only `PROGRAM_MANAGER`,
 same pattern as `recordProgramEvent()`), builds evidence, a model-input
 projection, and re-validates it at runtime against
 `modelInputProjectionSchema` before any attempt is created. Per attempt
-(max 2): one transaction creates the `PENDING` `ImpactAnalysis` row, the
-**complete** supplied-evidence `SourceReference` snapshot, and the
-`ANALYSIS_STARTED` audit event — all before the provider is ever called,
-outside any transaction. On success, a final transaction updates the
-`ImpactAnalysis` row (deterministic values, plus the readiness snapshot —
-see below), updates only the cited subset of the already-persisted
-`SourceReference` rows with citation metadata, creates exactly 3
-`MitigationOption` rows, and the `ANALYSIS_SUCCEEDED` audit event. A failed
-attempt's `SourceReference` rows are never revisited, so they correctly
-retain the complete supplied snapshot (all `wasCited: false`) alongside the
-safe error category — never a raw stack trace or provider payload. One
-`analysisRunId` per logical run links an attempt and its one retry, each
-with its own full evidence snapshot; each attempt keeps its own `traceId`.
-Retryable failure categories (transient provider error, malformed JSON,
-schema violation, invalid source IDs, deterministic mismatch) get exactly
-one retry with concise validation feedback; a configuration failure
-(missing key/model) is never retried and creates no `ImpactAnalysis` row at
-all, since there was no real attempt to record.
+(max 2), five explicit stages: pending-attempt persistence, provider
+invocation, structural validation, semantic validation, success
+persistence.
+
+- **Pending-attempt persistence** — one transaction creates the `PENDING`
+  `ImpactAnalysis` row, the **complete** supplied-evidence
+  `SourceReference` snapshot, and the `ANALYSIS_STARTED` audit event, all
+  before the provider is ever called. If this transaction fails, the
+  provider is never invoked, no attempt is counted, and — since Prisma
+  rolls the whole transaction back — no partial row of any kind survives.
+- **Provider invocation** — the _only_ stage wrapped in the `try/catch`
+  that calls `classifyProviderError()` (`runProviderAndValidate()`).
+  Structural and semantic validation happen immediately afterward, outside
+  that `catch` — they use `safeParse`/a validity-result object and never
+  throw, so nothing downstream of the provider call can be
+  misclassified as a provider failure.
+- **Success persistence** — its own, separate `try/catch`, entirely
+  outside the provider stage. A failure here is never retried and never
+  re-invokes the provider: `PERSISTENCE_FAILURE` is recorded through a
+  fresh call into the persistence interface, `ANALYSIS_FAILED` is created
+  only if that succeeds, the already-committed evidence snapshot is
+  untouched, and zero `MitigationOption` rows survive (the success
+  transaction itself rolled back). See `docs/DECISIONS.md`,
+  "Persistence-boundary repair: provider vs. persistence failure
+  separation".
+
+One `analysisRunId` per logical run links an attempt and its one retry,
+each with its own full evidence snapshot; each attempt keeps its own
+`traceId`. Retryable failure categories (transient provider error,
+malformed JSON, schema violation, invalid source IDs, deterministic
+mismatch) get exactly one retry with concise validation feedback;
+`CONFIGURATION_ERROR` and `PERSISTENCE_FAILURE` are never retried —
+neither creates a second provider call, since neither is something a
+retry against the same provider would fix.
+
+**Directly testable persistence injection.** `AnalysisPersistence`
+(`persistPendingAttempt`/`persistSucceededAttempt`/`persistFailedAttempt`)
+and `defaultAnalysisPersistence`, the real Prisma-backed implementation,
+let tests fail exactly one persistence stage via
+`runImpactAnalysis(..., { persistence: {...} })` — the same override-point
+shape already established for `options.provider`. `apps/web` never passes
+`options` at all, so this is unreachable from the web client without any
+separate gating. No global Prisma mock is used anywhere in this test
+suite.
 
 **Immutable readiness snapshot.** `ImpactAnalysis.readinessSnapshot`
 persists `modelInput.deterministicResults.readinessScore` exactly as

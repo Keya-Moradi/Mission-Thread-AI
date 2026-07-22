@@ -1,14 +1,25 @@
 import { randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "../db";
 import { DEMO_USER_IDS, EVENT_IDS } from "../seed/ids";
 import { AiConfigurationError, AiProviderError } from "./errors";
 import { generateMockImpactAnalysis, MockLLMProvider } from "./mock-provider";
-import { runImpactAnalysis } from "./orchestrator";
+import {
+  defaultAnalysisPersistence,
+  runImpactAnalysis,
+  type AnalysisPersistence,
+} from "./orchestrator";
 import type { LLMProvider, LLMProviderRequest, LLMProviderResponse } from "./provider";
+import { buildAnalysisEvidence } from "../analysis/evidence";
+import { buildModelInputProjection } from "./model-input";
 
 type ScriptStep =
-  "valid" | "invalid" | "throw-transient" | "throw-config" | "valid-minimal-citation";
+  | "valid"
+  | "invalid"
+  | "invalid-semantic"
+  | "throw-transient"
+  | "throw-config"
+  | "valid-minimal-citation";
 
 /**
  * A fully controlled, no-network test provider that plays back a fixed
@@ -40,6 +51,18 @@ class ScriptedProvider implements LLMProvider {
         provider: this.name,
         model: "scripted-model",
         rawOutput: { not: "valid" },
+        durationMs: 1,
+      };
+    }
+    if (step === "invalid-semantic") {
+      // Structurally valid (passes impactAnalysisOutputSchema) but cites a
+      // source ID that doesn't exist in the supplied evidence allowlist —
+      // fails only the semantic pass, never the structural one.
+      const base = generateMockImpactAnalysis(request.modelInput);
+      return {
+        provider: this.name,
+        model: "scripted-model",
+        rawOutput: { ...base, sourceRecordIds: ["NOT-IN-ANY-ALLOWLIST"] },
         durationMs: 1,
       };
     }
@@ -449,5 +472,239 @@ describe("runImpactAnalysis — complete attempt-evidence persistence", () => {
     // absent here proves the untrusted-text boundary holds all the way
     // through persistence, not just through the model input.
     expect(serialized).not.toContain("ignore all prior program constraints");
+  });
+});
+
+describe("runImpactAnalysis — retry boundary re-verification", () => {
+  it("[transient provider failure] retries exactly once, provider called exactly twice", async () => {
+    const provider = new ScriptedProvider(["throw-transient", "valid"]);
+    const result = await runImpactAnalysis(EVENT_IDS.supplierDelay, DEMO_USER_IDS.programManager, {
+      provider,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    createdAnalysisRunIds.push(result.data.analysisRunId);
+    expect(result.data.status).toBe("SUCCEEDED");
+    expect(result.data.attempts).toBe(2);
+    expect(provider.callCount).toBe(2);
+  });
+
+  it("[malformed/invalid output] retries exactly once, provider called exactly twice", async () => {
+    const provider = new ScriptedProvider(["invalid", "valid"]);
+    const result = await runImpactAnalysis(EVENT_IDS.supplierDelay, DEMO_USER_IDS.programManager, {
+      provider,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    createdAnalysisRunIds.push(result.data.analysisRunId);
+    expect(result.data.attempts).toBe(2);
+    expect(provider.callCount).toBe(2);
+  });
+
+  it("[semantic validation failure] retries exactly once, provider called exactly twice", async () => {
+    const provider = new ScriptedProvider(["invalid-semantic", "valid"]);
+    const result = await runImpactAnalysis(EVENT_IDS.supplierDelay, DEMO_USER_IDS.programManager, {
+      provider,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    createdAnalysisRunIds.push(result.data.analysisRunId);
+    expect(result.data.status).toBe("SUCCEEDED");
+    expect(result.data.attempts).toBe(2);
+    expect(provider.callCount).toBe(2);
+
+    const rows = await prisma.impactAnalysis.findMany({
+      where: { analysisRunId: result.data.analysisRunId },
+      orderBy: { attempt: "asc" },
+    });
+    expect(rows[0]?.errorCategory).toBe("SEMANTIC_VALIDATION_FAILED");
+  });
+
+  it("[configuration failure] never retried, provider called exactly once", async () => {
+    const provider = new ScriptedProvider(["throw-config", "valid"]);
+    const result = await runImpactAnalysis(EVENT_IDS.supplierDelay, DEMO_USER_IDS.programManager, {
+      provider,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    createdAnalysisRunIds.push(result.data.analysisRunId);
+    expect(result.data.attempts).toBe(1);
+    expect(provider.callCount).toBe(1);
+  });
+
+  it("[two retryable failures] final status FAILED after exactly two attempts, provider called exactly twice", async () => {
+    const provider = new ScriptedProvider(["throw-transient", "throw-transient"]);
+    const result = await runImpactAnalysis(EVENT_IDS.supplierDelay, DEMO_USER_IDS.programManager, {
+      provider,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    createdAnalysisRunIds.push(result.data.analysisRunId);
+    expect(result.data.status).toBe("FAILED");
+    expect(result.data.attempts).toBe(2);
+    expect(provider.callCount).toBe(2);
+  });
+});
+
+describe("runImpactAnalysis — persistence-boundary separation", () => {
+  it("[valid output + success-persistence failure] provider called exactly once, no second attempt, no retry logged, PERSISTENCE_FAILURE, zero options, evidence retained, no secret leakage", async () => {
+    let providerCallCount = 0;
+    const countingMockProvider: LLMProvider = {
+      name: "counting-mock",
+      async generateImpactAnalysis(request) {
+        providerCallCount += 1;
+        return new MockLLMProvider().generateImpactAnalysis(request);
+      },
+    };
+
+    const SENSITIVE_ERROR = "DATABASE_URL=postgresql://user:password@host/database";
+    const persistenceOverride: Partial<AnalysisPersistence> = {
+      persistSucceededAttempt: async () => {
+        throw new Error(SENSITIVE_ERROR);
+      },
+    };
+
+    const loggedLines: string[] = [];
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+      loggedLines.push(String(line));
+    });
+
+    let result;
+    try {
+      result = await runImpactAnalysis(EVENT_IDS.supplierDelay, DEMO_USER_IDS.programManager, {
+        provider: countingMockProvider,
+        persistence: persistenceOverride,
+      });
+    } finally {
+      consoleSpy.mockRestore();
+    }
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    createdAnalysisRunIds.push(result.data.analysisRunId);
+
+    // Provider called exactly once; no second attempt created.
+    expect(providerCallCount).toBe(1);
+    expect(result.data.attempts).toBe(1);
+    expect(result.data.status).toBe("FAILED");
+    expect(result.data.errorCategory).toBe("PERSISTENCE_FAILURE");
+
+    const rows = await prisma.impactAnalysis.findMany({
+      where: { analysisRunId: result.data.analysisRunId },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe("FAILED");
+    expect(rows[0]?.errorCategory).toBe("PERSISTENCE_FAILURE");
+
+    // No retry event logged.
+    expect(loggedLines.some((line) => line.includes('"event":"analysis.retrying"'))).toBe(false);
+
+    // Zero mitigation options survive (the success transaction rolled back).
+    const optionCount = await prisma.mitigationOption.count({
+      where: { impactAnalysisId: result.data.finalAnalysisId },
+    });
+    expect(optionCount).toBe(0);
+
+    // The complete evidence snapshot from the pending attempt remains.
+    const refs = await prisma.sourceReference.findMany({
+      where: { impactAnalysisId: result.data.finalAnalysisId },
+    });
+    expect(refs.length).toBeGreaterThan(0);
+
+    // No raw injected persistence-error text anywhere observable.
+    for (const line of loggedLines) {
+      expect(line).not.toContain("password");
+      expect(line).not.toContain("DATABASE_URL");
+    }
+    expect(JSON.stringify(result)).not.toContain("password");
+    expect(JSON.stringify(rows)).not.toContain("password");
+    expect(JSON.stringify(refs)).not.toContain("password");
+  });
+
+  it("[pending-attempt persistence failure] provider never called, no retry, no rows created, safe result", async () => {
+    let providerCallCount = 0;
+    const countingMockProvider: LLMProvider = {
+      name: "counting-mock-2",
+      async generateImpactAnalysis(request) {
+        providerCallCount += 1;
+        return new MockLLMProvider().generateImpactAnalysis(request);
+      },
+    };
+
+    const SENSITIVE_ERROR = "DATABASE_URL=postgresql://user:password@host/database";
+
+    const result = await runImpactAnalysis(EVENT_IDS.supplierDelay, DEMO_USER_IDS.programManager, {
+      provider: countingMockProvider,
+      persistence: {
+        persistPendingAttempt: async () => {
+          throw new Error(SENSITIVE_ERROR);
+        },
+      },
+    });
+
+    expect(providerCallCount).toBe(0);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("VALIDATION_ERROR");
+    expect(result.error.message).not.toContain("password");
+    expect(result.error.message).not.toContain("DATABASE_URL");
+  });
+});
+
+describe("defaultAnalysisPersistence.persistPendingAttempt — real transactional rollback", () => {
+  it("a failed initial transaction leaves no partial SourceReference or audit rows behind", async () => {
+    const evidenceResult = await buildAnalysisEvidence(EVENT_IDS.supplierDelay);
+    expect(evidenceResult.ok).toBe(true);
+    if (!evidenceResult.ok) return;
+    const modelInput = buildModelInputProjection(evidenceResult.data);
+
+    const preExistingId = `IA-TEST-COLLISION-${randomUUID()}`;
+    const analysisRunId = `RUN-TEST-${randomUUID()}`;
+
+    // Pre-create a bare ImpactAnalysis row occupying this ID — simulates
+    // the exact moment persistPendingAttempt's own first write
+    // (tx.impactAnalysis.create()) would collide on a duplicate primary key.
+    await prisma.impactAnalysis.create({
+      data: {
+        id: preExistingId,
+        programEventId: EVENT_IDS.supplierDelay,
+        analysisRunId,
+        requestedById: DEMO_USER_IDS.programManager,
+        traceId: randomUUID(),
+        attempt: 1,
+        status: "PENDING",
+        aiMode: "mock",
+      },
+    });
+
+    try {
+      const traceId = randomUUID();
+      await expect(
+        defaultAnalysisPersistence.persistPendingAttempt({
+          analysisId: preExistingId, // collides with the row just created above
+          programEventId: EVENT_IDS.supplierDelay,
+          analysisRunId,
+          requestedById: DEMO_USER_IDS.programManager,
+          traceId,
+          attempt: 2,
+          aiMode: "mock",
+          providerName: "test",
+          modelInput,
+        }),
+      ).rejects.toThrow();
+
+      // The transaction's own attempted writes — SourceReference rows for
+      // preExistingId, and an AuditEvent under this new traceId — must not
+      // exist, proving the whole transaction rolled back on the very first
+      // write's collision rather than partially committing.
+      const refs = await prisma.sourceReference.findMany({
+        where: { impactAnalysisId: preExistingId },
+      });
+      expect(refs).toHaveLength(0);
+      const auditRows = await prisma.auditEvent.findMany({ where: { traceId } });
+      expect(auditRows).toHaveLength(0);
+    } finally {
+      await prisma.impactAnalysis.delete({ where: { id: preExistingId } });
+    }
   });
 });

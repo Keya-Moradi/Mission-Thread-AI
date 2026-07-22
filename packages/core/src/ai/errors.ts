@@ -22,6 +22,14 @@ export const AI_ERROR_CATEGORIES = [
   // The output was structurally valid but failed semantic/source validation
   // (fabricated source ID, deterministic-value mismatch, etc). Retryable.
   "SEMANTIC_VALIDATION_FAILED",
+  // The provider succeeded and its output passed structural and semantic
+  // validation, but writing the result to the database failed (connection
+  // drop, constraint violation, transaction rollback). Never retryable: a
+  // retry would call the provider again for a response it already produced
+  // correctly, and a broken persistence layer isn't fixed by asking the
+  // provider to try again. See docs/DECISIONS.md, "Persistence-boundary
+  // repair: provider vs. persistence failure separation".
+  "PERSISTENCE_FAILURE",
 ] as const;
 
 export type AiErrorCategory = (typeof AI_ERROR_CATEGORIES)[number];

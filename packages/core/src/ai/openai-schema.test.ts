@@ -4,7 +4,32 @@ import {
   buildOpenAiImpactAnalysisJsonSchema,
   OPENAI_DISALLOWED_JSON_SCHEMA_KEYWORDS,
 } from "./openai-schema";
-import { impactAnalysisOutputSchema } from "./output-schema";
+import {
+  impactAnalysisOutputSchema,
+  MAX_MITIGATION_SCHEDULE_IMPACT_DAYS,
+  MIN_MITIGATION_SCHEDULE_IMPACT_DAYS,
+} from "./output-schema";
+
+/** Finds the first schema node (depth-first) whose JSON representation
+ * contains the given key, regardless of nesting under anyOf/items/etc. */
+function findNodeWithKey(node: unknown, key: string): Record<string, unknown> | undefined {
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = findNodeWithKey(item, key);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (node !== null && typeof node === "object") {
+    const obj = node as Record<string, unknown>;
+    if (key in obj) return obj;
+    for (const value of Object.values(obj)) {
+      const found = findNodeWithKey(value, key);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
 
 /** Recursively collects every object key present anywhere in a JSON value. */
 function collectAllKeys(node: unknown, keys: Set<string> = new Set()): Set<string> {
@@ -92,6 +117,43 @@ describe("buildOpenAiImpactAnalysisJsonSchema — generated schema shape", () =>
 
   it("does not throw when verified — self-consistency of the builder's own check", () => {
     expect(() => assertOpenAiCompatibleJsonSchema(schema)).not.toThrow();
+  });
+
+  it("[database-safe monetary pattern] the generated schema carries the Decimal(12,2)-safe regex pattern", () => {
+    const props = (schema as { properties: Record<string, unknown> }).properties;
+    const budgetNode = findNodeWithKey(props.budgetExposureAmount, "pattern");
+    expect(budgetNode).toBeDefined();
+    expect(budgetNode?.pattern).toBe("^\\d{1,10}\\.\\d{2}$");
+  });
+
+  it("[database-safe monetary pattern] a mitigation option's costImpact carries the same pattern", () => {
+    const props = (schema as { properties: Record<string, unknown> }).properties;
+    const mitigationOptions = props.mitigationOptions as Record<string, unknown>;
+    const optionItemSchema = mitigationOptions.items as Record<string, unknown>;
+    const optionProps = optionItemSchema.properties as Record<string, unknown>;
+    const costNode = findNodeWithKey(optionProps.costImpact, "pattern");
+    expect(costNode).toBeDefined();
+    expect(costNode?.pattern).toBe("^\\d{1,10}\\.\\d{2}$");
+  });
+
+  it("[schedule-impact minimum] the generated schema carries the documented minimum", () => {
+    const props = (schema as { properties: Record<string, unknown> }).properties;
+    const mitigationOptions = props.mitigationOptions as Record<string, unknown>;
+    const optionItemSchema = mitigationOptions.items as Record<string, unknown>;
+    const optionProps = optionItemSchema.properties as Record<string, unknown>;
+    const scheduleNode = findNodeWithKey(optionProps.scheduleImpact, "minimum");
+    expect(scheduleNode).toBeDefined();
+    expect(scheduleNode?.minimum).toBe(MIN_MITIGATION_SCHEDULE_IMPACT_DAYS);
+  });
+
+  it("[schedule-impact maximum] the generated schema carries the documented maximum", () => {
+    const props = (schema as { properties: Record<string, unknown> }).properties;
+    const mitigationOptions = props.mitigationOptions as Record<string, unknown>;
+    const optionItemSchema = mitigationOptions.items as Record<string, unknown>;
+    const optionProps = optionItemSchema.properties as Record<string, unknown>;
+    const scheduleNode = findNodeWithKey(optionProps.scheduleImpact, "maximum");
+    expect(scheduleNode).toBeDefined();
+    expect(scheduleNode?.maximum).toBe(MAX_MITIGATION_SCHEDULE_IMPACT_DAYS);
   });
 });
 

@@ -389,14 +389,22 @@ false`, no streaming/tools/web search/file search/conversations.
 
 Every attempt's output — from either provider — is re-validated twice
 before anything is persisted: structurally against the authoritative Zod
-output schema, then semantically against the request's own model input
-(every cited source ID must exist in the supplied evidence allowlist; the
-reported schedule/budget exposure must exactly equal the deterministic
-value already computed). On a retryable failure (malformed JSON, schema
-violation, invalid citation, deterministic mismatch, transient provider
-error), the orchestration service retries exactly once with concise
-validation feedback; a configuration failure (missing key/model) is never
-retried. See `docs/SPEC.md` §9–10 and `docs/ARCHITECTURE.md`.
+output schema (which also enforces database-safe bounds — monetary values
+fit PostgreSQL `Decimal(12,2)`'s 10-integer-digit capacity, a mitigation
+option's proposed schedule impact is bounded to ±3650 days — so a
+structurally "valid" response can never fail at the actual write), then
+semantically against the request's own model input (every cited source ID
+must exist in the supplied evidence allowlist; the reported schedule/budget
+exposure must exactly equal the deterministic value already computed). On
+a retryable failure (malformed JSON, schema violation, invalid citation,
+deterministic mismatch, transient provider error), the orchestration
+service retries exactly once with concise validation feedback; a
+configuration failure (missing key/model) is never retried. A **persistence**
+failure — the provider responded correctly, but writing the result to the
+database failed — is a separate, non-retryable category
+(`PERSISTENCE_FAILURE`): the provider is never called a second time to
+compensate for an application-side write failure. See `docs/SPEC.md` §9–10
+and `docs/ARCHITECTURE.md`.
 
 ## Limitations
 
