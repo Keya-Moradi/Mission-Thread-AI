@@ -10,10 +10,28 @@ interface VerificationGapJson {
   summary: string;
 }
 
+interface ReadinessSnapshotJson {
+  totalScore: number;
+  factors: Array<{ label: string; score: number; detail: string }>;
+}
+
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
     : [];
+}
+
+function asReadinessSnapshot(value: unknown): ReadinessSnapshotJson | null {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("totalScore" in value) ||
+    !("factors" in value) ||
+    !Array.isArray((value as { factors: unknown }).factors)
+  ) {
+    return null;
+  }
+  return value as ReadinessSnapshotJson;
 }
 
 function asVerificationGaps(value: unknown): VerificationGapJson[] {
@@ -175,6 +193,32 @@ export default async function AnalysisWorkspacePage({
             </dl>
           </Section>
 
+          <Section title="Program readiness at analysis time">
+            <p className="mt-2 text-xs text-muted">
+              A snapshot of program readiness captured when this analysis ran — never recalculated,
+              so this attempt&apos;s record stays accurate even after later program changes.
+            </p>
+            {(() => {
+              const readiness = asReadinessSnapshot(succeeded.readinessSnapshot);
+              if (!readiness)
+                return <EmptyState message="Readiness was unavailable when this analysis ran." />;
+              return (
+                <>
+                  <p className="mt-3 text-lg font-semibold text-foreground">
+                    {readiness.totalScore}/100
+                  </p>
+                  <dl className="mt-2 grid grid-cols-2 gap-x-6 gap-y-2 text-xs text-muted sm:grid-cols-5">
+                    {readiness.factors.map((factor) => (
+                      <Field key={factor.label} label={factor.label}>
+                        {factor.score.toFixed(1)}/20
+                      </Field>
+                    ))}
+                  </dl>
+                </>
+              );
+            })()}
+          </Section>
+
           <Section title="Verification gaps">
             {asVerificationGaps(succeeded.verificationGaps).length === 0 ? (
               <EmptyState message="No verification gaps identified." />
@@ -262,7 +306,12 @@ export default async function AnalysisWorkspacePage({
             </div>
           </Section>
 
-          <Section title="Evidence citations">
+          <Section title="Evidence supplied to analysis">
+            <p className="mt-2 text-xs text-muted">
+              Every record supplied to this attempt&apos;s model input. Not every supplied record
+              was necessarily cited by the model — &ldquo;Cited&rdquo; marks the ones the output
+              actually referenced, and where.
+            </p>
             <div className="mt-3 flex flex-col gap-3">
               {[...evidenceByType.entries()].map(([type, items]) => (
                 <div key={type}>
@@ -271,9 +320,21 @@ export default async function AnalysisWorkspacePage({
                   </h3>
                   <ul className="mt-1 flex flex-col gap-1 text-sm">
                     {items.map((item) => (
-                      <li key={item.id} className="text-foreground">
-                        <span className="font-mono text-xs text-muted">{item.recordId}</span>{" "}
-                        {item.summary}
+                      <li
+                        key={item.id}
+                        className="flex flex-wrap items-center gap-2 text-foreground"
+                      >
+                        <span className="font-mono text-xs text-muted">{item.recordId}</span>
+                        <span>{item.summary}</span>
+                        {item.wasCited ? (
+                          <span className="rounded-full bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent">
+                            Cited ({asStringArray(item.citationContexts).join(", ")})
+                          </span>
+                        ) : (
+                          <span className="rounded-full bg-border px-2 py-0.5 text-xs font-medium text-muted">
+                            Supplied only
+                          </span>
+                        )}
                       </li>
                     ))}
                   </ul>

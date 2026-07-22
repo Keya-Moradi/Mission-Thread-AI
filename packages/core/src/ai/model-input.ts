@@ -82,13 +82,24 @@ const readinessFactorProjectionSchema = z
   })
   .strict();
 
-const readinessScoreProjectionSchema = z
+/**
+ * The authoritative shape of a readiness result inside a model-input
+ * projection — also reused, unchanged, as the persisted
+ * ImpactAnalysis.readinessSnapshot content schema (see
+ * attempt-persistence.ts), rather than inventing a second representation
+ * for what is the same data at rest. See docs/DECISIONS.md, "Phase 4
+ * correction: immutable readiness snapshot".
+ */
+export const readinessSnapshotSchema = z
   .object({
     totalScore: z.number().int(),
     factors: z.array(readinessFactorProjectionSchema).max(MODEL_INPUT_LIMITS.maxReadinessFactors),
   })
-  .strict()
-  .nullable();
+  .strict();
+
+export type ReadinessSnapshot = z.infer<typeof readinessSnapshotSchema>;
+
+const readinessScoreProjectionSchema = readinessSnapshotSchema.nullable();
 
 const evidenceAllowlistItemSchema = z
   .object({

@@ -12,8 +12,10 @@ export {
   buildModelInputProjection,
   checkModelInputSize,
   modelInputProjectionSchema,
+  readinessSnapshotSchema,
   type ModelInputProjection,
   type ModelInputSizeCheck,
+  type ReadinessSnapshot,
 } from "./model-input";
 export {
   OUTPUT_LIMITS,
@@ -28,6 +30,17 @@ export {
 } from "./output-validation";
 export { MockLLMProvider, generateMockImpactAnalysis } from "./mock-provider";
 export { OpenAiImpactAnalysisProvider } from "./openai-provider";
+export {
+  assertOpenAiCompatibleJsonSchema,
+  buildOpenAiImpactAnalysisJsonSchema,
+  OPENAI_DISALLOWED_JSON_SCHEMA_KEYWORDS,
+} from "./openai-schema";
+export {
+  buildAttemptSourceReferenceSnapshot,
+  buildSucceededImpactAnalysisData,
+  type AttemptSourceReferenceInput,
+  type SucceededAttemptData,
+} from "./attempt-persistence";
 export { AI_MODES, createProviderFromEnv, resolveAiMode, type AiMode } from "./provider-factory";
 export {
   ANALYSIS_LOG_EVENTS,

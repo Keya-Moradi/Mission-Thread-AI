@@ -420,6 +420,12 @@ model ImpactAnalysis {
   assumptions          Json?
   unknowns             Json?
   confidence           ConfidenceLevel?
+  // Analysis-time snapshot of calculateReadinessScore(), captured from the
+  // same modelInput.deterministicResults.readinessScore this attempt was
+  // built from — never recalculated on read. Null only when readiness
+  // genuinely could not be computed when this attempt ran (see
+  // docs/DECISIONS.md, "Phase 4 correction: immutable readiness snapshot").
+  readinessSnapshot    Json?
   validationPassed     Boolean?
   validationErrors     Json?
   errorCategory        String?
@@ -437,15 +443,31 @@ model ImpactAnalysis {
   @@index([requestedById])
 }
 
-// The bounded evidence allowlist an analysis was built from and/or cited.
-// "Affected requirement/milestone IDs" are derived by filtering these rows by
-// recordType rather than duplicating them into separate array columns.
+// The complete evidence allowlist supplied to an analysis attempt — every
+// row the attempt's model input actually contained, not just the subset the
+// model went on to cite. "Affected requirement/milestone IDs" are derived by
+// filtering these rows by recordType rather than duplicating them into
+// separate array columns. Persisted for every attempt (including failed
+// ones) before the provider is ever called — see
+// docs/DECISIONS.md, "Phase 4 correction: complete attempt-evidence
+// persistence".
 model SourceReference {
   id               String     @id @default(cuid())
   impactAnalysisId String
   recordId         String
   recordType       RecordType
   summary          String
+  // False for every row at creation time (the full supplied snapshot, built
+  // before the provider call); updated to true — with citationContexts —
+  // only for the subset the model actually cited, once a successful
+  // response has passed validation. A failed attempt's rows never get this
+  // update, so they stay wasCited:false, correctly reflecting that nothing
+  // was ever confirmed cited.
+  wasCited         Boolean    @default(false)
+  // Bounded, fixed-vocabulary strings only (e.g. "analysis", "option:0") —
+  // never free-form model text. See buildAttemptSourceReferenceSnapshot()
+  // in packages/core/src/ai/attempt-persistence.ts.
+  citationContexts Json?
   createdAt        DateTime   @default(now())
 
   impactAnalysis ImpactAnalysis @relation(fields: [impactAnalysisId], references: [id])

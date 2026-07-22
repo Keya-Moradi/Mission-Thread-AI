@@ -7,7 +7,8 @@ import { generateMockImpactAnalysis, MockLLMProvider } from "./mock-provider";
 import { runImpactAnalysis } from "./orchestrator";
 import type { LLMProvider, LLMProviderRequest, LLMProviderResponse } from "./provider";
 
-type ScriptStep = "valid" | "invalid" | "throw-transient" | "throw-config";
+type ScriptStep =
+  "valid" | "invalid" | "throw-transient" | "throw-config" | "valid-minimal-citation";
 
 /**
  * A fully controlled, no-network test provider that plays back a fixed
@@ -39,6 +40,28 @@ class ScriptedProvider implements LLMProvider {
         provider: this.name,
         model: "scripted-model",
         rawOutput: { not: "valid" },
+        durationMs: 1,
+      };
+    }
+    if (step === "valid-minimal-citation") {
+      // Cites only the triggering PROGRAM_EVENT record everywhere a
+      // citation is required — deliberately leaves every other allowlisted
+      // record (which the real seeded evidence always includes several of)
+      // uncited, so tests can prove an uncited-but-supplied record still
+      // gets persisted with wasCited:false.
+      const base = generateMockImpactAnalysis(request.modelInput);
+      const onlyEventId = [request.modelInput.eventFacts.eventId];
+      return {
+        provider: this.name,
+        model: "scripted-model",
+        rawOutput: {
+          ...base,
+          sourceRecordIds: onlyEventId,
+          mitigationOptions: base.mitigationOptions.map((option) => ({
+            ...option,
+            sourceRecordIds: onlyEventId,
+          })),
+        },
         durationMs: 1,
       };
     }
@@ -301,5 +324,130 @@ describe("runImpactAnalysis — attempt lifecycle", () => {
       expect(JSON.stringify(row.validationErrors ?? "")).not.toContain("SECRET_CONNECTION_STRING");
       expect(row.errorCategory).not.toContain("SECRET");
     }
+  });
+});
+
+describe("runImpactAnalysis — complete attempt-evidence persistence", () => {
+  it("[complete evidence snapshot] every allowlisted record supplied to the attempt is persisted, not just the cited subset", async () => {
+    const provider = new ScriptedProvider(["valid-minimal-citation"]);
+    const result = await runImpactAnalysis(EVENT_IDS.supplierDelay, DEMO_USER_IDS.programManager, {
+      provider,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    createdAnalysisRunIds.push(result.data.analysisRunId);
+
+    const modelInput = provider.requests[0]!.modelInput;
+    const refs = await prisma.sourceReference.findMany({
+      where: { impactAnalysisId: result.data.finalAnalysisId },
+    });
+    expect(refs).toHaveLength(modelInput.evidenceAllowlist.length);
+    const persistedIds = new Set(refs.map((r) => r.recordId));
+    for (const item of modelInput.evidenceAllowlist) {
+      expect(persistedIds.has(item.recordId)).toBe(true);
+    }
+  });
+
+  it("[uncited record remains persisted with wasCited:false]", async () => {
+    const provider = new ScriptedProvider(["valid-minimal-citation"]);
+    const result = await runImpactAnalysis(EVENT_IDS.supplierDelay, DEMO_USER_IDS.programManager, {
+      provider,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    createdAnalysisRunIds.push(result.data.analysisRunId);
+
+    const modelInput = provider.requests[0]!.modelInput;
+    const refs = await prisma.sourceReference.findMany({
+      where: { impactAnalysisId: result.data.finalAnalysisId },
+    });
+    // Only the triggering PROGRAM_EVENT was cited by "valid-minimal-citation"
+    // — the seeded event's evidence allowlist always has several other
+    // records too (component, requirements, milestones, ...), so this
+    // asserts on a real one rather than a fabricated ID.
+    const uncitedCandidate = modelInput.evidenceAllowlist.find(
+      (item) => item.recordId !== modelInput.eventFacts.eventId,
+    );
+    expect(uncitedCandidate).toBeDefined();
+    const uncitedRow = refs.find((r) => r.recordId === uncitedCandidate!.recordId);
+    expect(uncitedRow).toBeDefined();
+    expect(uncitedRow?.wasCited).toBe(false);
+    expect(uncitedRow?.citationContexts).toEqual([]);
+
+    const citedRow = refs.find((r) => r.recordId === modelInput.eventFacts.eventId);
+    expect(citedRow?.wasCited).toBe(true);
+    expect(citedRow?.citationContexts).toContain("analysis");
+  });
+
+  it("[failed attempt retains its complete supplied evidence snapshot]", async () => {
+    const provider = new ScriptedProvider(["invalid", "invalid"]);
+    const result = await runImpactAnalysis(EVENT_IDS.supplierDelay, DEMO_USER_IDS.programManager, {
+      provider,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    createdAnalysisRunIds.push(result.data.analysisRunId);
+    expect(result.data.status).toBe("FAILED");
+
+    const modelInput = provider.requests[0]!.modelInput;
+    const rows = await prisma.impactAnalysis.findMany({
+      where: { analysisRunId: result.data.analysisRunId },
+      include: { sourceReferences: true },
+    });
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.sourceReferences).toHaveLength(modelInput.evidenceAllowlist.length);
+      expect(row.sourceReferences.every((ref) => ref.wasCited === false)).toBe(true);
+    }
+  });
+
+  it("[retry attempts each retain their own separate full snapshot]", async () => {
+    const provider = new ScriptedProvider(["invalid", "valid"]);
+    const result = await runImpactAnalysis(EVENT_IDS.supplierDelay, DEMO_USER_IDS.programManager, {
+      provider,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    createdAnalysisRunIds.push(result.data.analysisRunId);
+
+    const rows = await prisma.impactAnalysis.findMany({
+      where: { analysisRunId: result.data.analysisRunId },
+      orderBy: { attempt: "asc" },
+      include: { sourceReferences: true },
+    });
+    expect(rows).toHaveLength(2);
+    // Distinct impactAnalysisId per attempt means distinct SourceReference
+    // rows per attempt by construction (impactAnalysisId is part of the
+    // unique key) — assert both attempts actually got a full snapshot, not
+    // that one was skipped because "the input was identical".
+    expect(rows[0]?.sourceReferences.length).toBeGreaterThan(0);
+    expect(rows[1]?.sourceReferences.length).toBeGreaterThan(0);
+    expect(rows[0]?.sourceReferences.length).toBe(rows[1]?.sourceReferences.length);
+    const attempt1Ids = new Set(rows[0]!.sourceReferences.map((r) => r.id));
+    const attempt2Ids = new Set(rows[1]!.sourceReferences.map((r) => r.id));
+    expect([...attempt1Ids].some((id) => attempt2Ids.has(id))).toBe(false);
+    // The failed first attempt's rows are all uncited; the second,
+    // successful attempt has at least the top-level citation marked.
+    expect(rows[0]?.sourceReferences.every((ref) => ref.wasCited === false)).toBe(true);
+    expect(rows[1]?.sourceReferences.some((ref) => ref.wasCited === true)).toBe(true);
+  });
+
+  it("[no untrusted text in persisted SourceReference rows]", async () => {
+    const result = await runImpactAnalysis(EVENT_IDS.supplierDelay, DEMO_USER_IDS.programManager, {
+      provider: new MockLLMProvider(),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    createdAnalysisRunIds.push(result.data.analysisRunId);
+
+    const refs = await prisma.sourceReference.findMany({
+      where: { impactAnalysisId: result.data.finalAnalysisId },
+    });
+    const serialized = JSON.stringify(refs);
+    // The seeded EVT-SUPPLIER-001 event's rawNotes contains a deliberate
+    // prompt-injection-style sentence (see prisma/seed.ts) — proving it's
+    // absent here proves the untrusted-text boundary holds all the way
+    // through persistence, not just through the model input.
+    expect(serialized).not.toContain("ignore all prior program constraints");
   });
 });

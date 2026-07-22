@@ -61,7 +61,6 @@ import {
   SUPPLIER_IDS,
   TEST_IDS,
 } from "../src/seed/ids";
-import { evidenceRecordTypeSchema } from "../src/record-types";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
@@ -896,6 +895,8 @@ async function seedImpactAnalysis(programManagerId: string) {
     generateMockImpactAnalysis,
     impactAnalysisOutputSchema,
     validateImpactAnalysisSemantics,
+    buildAttemptSourceReferenceSnapshot,
+    buildSucceededImpactAnalysisData,
   } = await import("../src/ai");
 
   const evidenceResult = await buildAnalysisEvidence(EVENT_IDS.supplierDelay);
@@ -919,16 +920,14 @@ async function seedImpactAnalysis(programManagerId: string) {
     );
   }
 
-  const recordTypeById = new Map(
-    modelInput.evidenceAllowlist.map((item) => [item.recordId, item.recordType]),
-  );
-  const summaryById = new Map(
-    modelInput.evidenceAllowlist.map((item) => [item.recordId, item.summary]),
-  );
-  const citedIds = new Set<string>([
-    ...output.sourceRecordIds,
-    ...output.mitigationOptions.flatMap((option) => option.sourceRecordIds),
-  ]);
+  // Same pure helpers runtime persistence uses (packages/core/src/ai/
+  // attempt-persistence.ts) — not a separate, cited-only seed
+  // implementation. Produces the complete supplied-evidence snapshot (every
+  // allowlisted record, with citation metadata for the subset the mock
+  // output actually cited) and the deterministic-values success payload
+  // (readiness snapshot included), exactly as runImpactAnalysis() would.
+  const evidenceSnapshot = buildAttemptSourceReferenceSnapshot(modelInput, output);
+  const successData = buildSucceededImpactAnalysisData(output, modelInput);
 
   const traceId = ANALYSIS_TRACE_IDS.supplierDelay;
   const startedAt = new Date("2026-07-17T12:30:00.000Z");
@@ -941,19 +940,22 @@ async function seedImpactAnalysis(programManagerId: string) {
       analysisRunId: ANALYSIS_RUN_IDS.supplierDelay,
       requestedById: programManagerId,
       traceId,
-      status: "SUCCEEDED",
+      status: successData.status,
       aiMode: "mock",
       provider: "mock",
       model: "mock-deterministic-v1",
       attempt: 1,
-      executiveSummary: output.executiveSummary,
-      missionImpact: output.missionImpact,
-      scheduleExposureDays: output.scheduleExposureDays,
-      budgetExposureAmount: output.budgetExposureAmount,
-      verificationGaps: output.verificationGaps,
-      assumptions: output.assumptions,
-      unknowns: output.unknowns,
-      confidence: output.confidence,
+      executiveSummary: successData.executiveSummary,
+      missionImpact: successData.missionImpact,
+      scheduleExposureDays: successData.scheduleExposureDays,
+      budgetExposureAmount: successData.budgetExposureAmount,
+      // DbNull, not JsonNull — see docs/DECISIONS.md, "Phase 4 correction:
+      // immutable readiness snapshot" (matches orchestrator.ts exactly).
+      readinessSnapshot: successData.readinessSnapshot ?? Prisma.DbNull,
+      verificationGaps: successData.verificationGaps,
+      assumptions: successData.assumptions,
+      unknowns: successData.unknowns,
+      confidence: successData.confidence,
       validationPassed: true,
       durationMs: 5,
       createdAt: succeededAt,
@@ -961,19 +963,20 @@ async function seedImpactAnalysis(programManagerId: string) {
   });
 
   // Deterministic without a pre-enumerated ID list: derived directly from
-  // each cited record's own (recordType, recordId), which is itself already
-  // fully deterministic seed data — see docs/DECISIONS.md.
-  for (const recordId of citedIds) {
-    const recordType = recordTypeById.get(recordId);
-    const parsedType = evidenceRecordTypeSchema.safeParse(recordType);
-    if (!parsedType.success) continue;
+  // each record's own (recordType, recordId), which is itself already fully
+  // deterministic seed data — see docs/DECISIONS.md. Persists the COMPLETE
+  // supplied-evidence snapshot, not just the cited subset — matching
+  // runImpactAnalysis()'s own attempt-lifecycle behavior.
+  for (const item of evidenceSnapshot) {
     await prisma.sourceReference.create({
       data: {
-        id: `SRC-EVT-SUPPLIER-001-${parsedType.data}-${recordId}`,
+        id: `SRC-EVT-SUPPLIER-001-${item.recordType}-${item.recordId}`,
         impactAnalysisId: ANALYSIS_IDS.supplierDelay,
-        recordId,
-        recordType: parsedType.data,
-        summary: summaryById.get(recordId) ?? "",
+        recordId: item.recordId,
+        recordType: item.recordType,
+        summary: item.summary,
+        wasCited: item.wasCited,
+        citationContexts: item.citationContexts,
         createdAt: succeededAt,
       },
     });

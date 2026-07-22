@@ -1,4 +1,3 @@
-import { z } from "zod";
 import OpenAI, {
   APIConnectionError,
   APIConnectionTimeoutError,
@@ -7,21 +6,20 @@ import OpenAI, {
   PermissionDeniedError,
   RateLimitError,
 } from "openai";
-import { impactAnalysisOutputSchema } from "./output-schema";
+import { buildOpenAiImpactAnalysisJsonSchema } from "./openai-schema";
 import { AiConfigurationError, AiProviderError } from "./errors";
 import type { LLMProvider, LLMProviderRequest, LLMProviderResponse } from "./provider";
 import { buildImpactAnalysisUserPrompt } from "./prompts/impact-analysis-user";
 
 // Generated once at module load — the schema itself never changes at
-// runtime, and z.toJSONSchema() is a pure function of impactAnalysisOutputSchema.
-// Per docs/DECISIONS.md, "Live provider JSON schema source": this is
-// generated FROM the authoritative Zod schema (never hand-duplicated), and
-// the parsed response is always re-validated against that same Zod schema
-// afterward — this JSON schema is steering for the API, never the sole
-// enforcement.
-const OUTPUT_JSON_SCHEMA = z.toJSONSchema(impactAnalysisOutputSchema, {
-  target: "draft-2020-12",
-});
+// runtime. Always derived FROM impactAnalysisOutputSchema and verified
+// against OpenAI's supported JSON Schema subset (see openai-schema.ts,
+// docs/DECISIONS.md "Phase 4 correction: provider-facing JSON Schema
+// subset") — never hand-duplicated. The parsed response is always
+// re-validated against that same authoritative Zod schema afterward (see
+// generateImpactAnalysis() below and orchestrator.ts) — this JSON schema is
+// steering for the API, never the sole enforcement.
+const OUTPUT_JSON_SCHEMA = buildOpenAiImpactAnalysisJsonSchema();
 
 /**
  * Never touches Prisma, never mutates application state, never decides
@@ -64,7 +62,7 @@ export class OpenAiImpactAnalysisProvider implements LLMProvider {
           format: {
             type: "json_schema",
             name: "impact_analysis_output",
-            schema: OUTPUT_JSON_SCHEMA as Record<string, unknown>,
+            schema: OUTPUT_JSON_SCHEMA,
             strict: true,
           },
         },

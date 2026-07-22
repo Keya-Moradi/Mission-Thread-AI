@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { entityIdSchema } from "../analysis/schemas";
 import { buildAnalysisEvidence } from "../analysis/evidence";
-import { evidenceRecordTypeSchema } from "../record-types";
 import { ok, notFound, validationError, forbidden, type ServiceResult } from "../analysis/types";
 import { createProviderFromEnv } from "./provider-factory";
 import {
   buildModelInputProjection,
   checkModelInputSize,
+  modelInputProjectionSchema,
   type ModelInputProjection,
 } from "./model-input";
 import { IMPACT_ANALYSIS_SYSTEM_PROMPT } from "./prompts/impact-analysis-system";
@@ -15,6 +16,10 @@ import { impactAnalysisOutputSchema, summarizeOutputSchemaErrors } from "./outpu
 import { validateImpactAnalysisSemantics } from "./output-validation";
 import { classifyProviderError, isRetryableCategory, type AiErrorCategory } from "./errors";
 import { logAnalysisEvent } from "./logging";
+import {
+  buildAttemptSourceReferenceSnapshot,
+  buildSucceededImpactAnalysisData,
+} from "./attempt-persistence";
 import type { LLMProvider } from "./provider";
 
 const MAX_ATTEMPTS = 2;
@@ -28,12 +33,90 @@ export interface RunImpactAnalysisResult {
   errorCategory?: AiErrorCategory;
 }
 
-async function persistFailedAttempt(
-  analysisId: string,
-  category: AiErrorCategory,
-  durationMs: number,
-  validationErrors: string[] | null,
-): Promise<void> {
+/**
+ * Persists the complete evidence snapshot an attempt was built from —
+ * every allowlisted record, wasCited:false — plus the PENDING
+ * ImpactAnalysis row and its ANALYSIS_STARTED audit event, all in one
+ * transaction, before the provider is ever called. See
+ * docs/DECISIONS.md, "Phase 4 correction: complete attempt-evidence
+ * persistence" — a failed attempt's rows are never touched again after
+ * this, so they correctly retain the full supplied snapshot.
+ */
+async function persistPendingAttempt(params: {
+  analysisId: string;
+  programEventId: string;
+  analysisRunId: string;
+  requestedById: string;
+  traceId: string;
+  attempt: number;
+  aiMode: string;
+  providerName: string;
+  modelInput: ModelInputProjection;
+}): Promise<void> {
+  const {
+    analysisId,
+    programEventId,
+    analysisRunId,
+    requestedById,
+    traceId,
+    attempt,
+    aiMode,
+    providerName,
+    modelInput,
+  } = params;
+
+  const suppliedSnapshot = buildAttemptSourceReferenceSnapshot(modelInput);
+
+  await prisma.$transaction(async (tx) => {
+    await tx.impactAnalysis.create({
+      data: {
+        id: analysisId,
+        programEventId,
+        analysisRunId,
+        requestedById,
+        traceId,
+        attempt,
+        status: "PENDING",
+        aiMode,
+        provider: providerName,
+      },
+    });
+
+    for (const item of suppliedSnapshot) {
+      await tx.sourceReference.create({
+        data: {
+          impactAnalysisId: analysisId,
+          recordId: item.recordId,
+          recordType: item.recordType,
+          summary: item.summary,
+          wasCited: item.wasCited,
+          citationContexts: item.citationContexts,
+        },
+      });
+    }
+
+    await tx.auditEvent.create({
+      data: {
+        traceId,
+        actorUserId: requestedById,
+        actorType: "USER",
+        action: "ANALYSIS_STARTED",
+        targetRecordId: analysisId,
+        targetRecordType: "IMPACT_ANALYSIS",
+        afterValue: { eventId: programEventId, analysisRunId, attempt },
+      },
+    });
+  });
+}
+
+async function persistFailedAttempt(params: {
+  analysisId: string;
+  category: AiErrorCategory;
+  durationMs: number;
+  validationErrors: string[] | null;
+  providerModel?: string;
+}): Promise<void> {
+  const { analysisId, category, durationMs, validationErrors, providerModel } = params;
   await prisma.impactAnalysis.update({
     where: { id: analysisId },
     data: {
@@ -42,67 +125,83 @@ async function persistFailedAttempt(
       validationErrors: validationErrors ?? undefined,
       errorCategory: category,
       durationMs,
+      model: providerModel,
     },
   });
 }
 
+/**
+ * Final transaction for a successful attempt: updates the already-created
+ * ImpactAnalysis row (deterministic values from modelInput, never the
+ * model's own copy — see buildSucceededImpactAnalysisData()), updates the
+ * cited subset of the already-persisted SourceReference rows with citation
+ * metadata (never re-creates them — they exist from persistPendingAttempt),
+ * creates exactly 3 MitigationOption rows, and the ANALYSIS_SUCCEEDED audit
+ * event.
+ */
 async function persistSucceededAttempt(params: {
   analysisId: string;
   traceId: string;
   actorUserId: string;
   eventId: string;
   durationMs: number;
+  providerModel?: string;
   output: import("./output-schema").ImpactAnalysisOutput;
   modelInput: ModelInputProjection;
 }): Promise<void> {
-  const { analysisId, traceId, actorUserId, eventId, durationMs, output, modelInput } = params;
+  const {
+    analysisId,
+    traceId,
+    actorUserId,
+    eventId,
+    durationMs,
+    providerModel,
+    output,
+    modelInput,
+  } = params;
 
-  // Maps every allowlisted evidence record's ID -> recordType, so a model
-  // output's sourceRecordIds (which only carries the ID) can be persisted
-  // with the correct RecordType — safe to trust here because semantic
-  // validation already confirmed every cited ID exists in this allowlist.
-  const recordTypeById = new Map(
-    modelInput.evidenceAllowlist.map((item) => [item.recordId, item.recordType]),
-  );
-  const summaryById = new Map(
-    modelInput.evidenceAllowlist.map((item) => [item.recordId, item.summary]),
-  );
-
-  const citedIds = new Set<string>([
-    ...output.sourceRecordIds,
-    ...output.mitigationOptions.flatMap((option) => option.sourceRecordIds),
-  ]);
+  const data = buildSucceededImpactAnalysisData(output, modelInput);
+  const citedSnapshot = buildAttemptSourceReferenceSnapshot(modelInput, output);
 
   await prisma.$transaction(async (tx) => {
     await tx.impactAnalysis.update({
       where: { id: analysisId },
       data: {
-        status: "SUCCEEDED",
-        validationPassed: true,
+        status: data.status,
+        validationPassed: data.validationPassed,
         validationErrors: undefined,
-        executiveSummary: output.executiveSummary,
-        missionImpact: output.missionImpact,
-        scheduleExposureDays: output.scheduleExposureDays,
-        budgetExposureAmount: output.budgetExposureAmount,
-        verificationGaps: output.verificationGaps,
-        assumptions: output.assumptions,
-        unknowns: output.unknowns,
-        confidence: output.confidence,
+        executiveSummary: data.executiveSummary,
+        missionImpact: data.missionImpact,
+        scheduleExposureDays: data.scheduleExposureDays,
+        budgetExposureAmount: data.budgetExposureAmount,
+        // DbNull, not JsonNull: an unavailable readiness snapshot must be a
+        // real SQL NULL in this nullable Json column, not the stored JSON
+        // literal "null" — see docs/DECISIONS.md, "Phase 4 correction:
+        // immutable readiness snapshot".
+        readinessSnapshot: data.readinessSnapshot ?? Prisma.DbNull,
+        verificationGaps: data.verificationGaps,
+        assumptions: data.assumptions,
+        unknowns: data.unknowns,
+        confidence: data.confidence,
         durationMs,
+        model: providerModel,
       },
     });
 
-    for (const recordId of citedIds) {
-      const recordType = recordTypeById.get(recordId);
-      const parsedType = evidenceRecordTypeSchema.safeParse(recordType);
-      if (!parsedType.success) continue; // already excluded by semantic validation; defensive only
-      await tx.sourceReference.create({
-        data: {
-          impactAnalysisId: analysisId,
-          recordId,
-          recordType: parsedType.data,
-          summary: summaryById.get(recordId) ?? "",
+    for (const item of citedSnapshot) {
+      // Uncited rows are already correctly wasCited:false from
+      // persistPendingAttempt's initial transaction — only the cited subset
+      // needs an update here.
+      if (!item.wasCited) continue;
+      await tx.sourceReference.update({
+        where: {
+          impactAnalysisId_recordType_recordId: {
+            impactAnalysisId: analysisId,
+            recordType: item.recordType,
+            recordId: item.recordId,
+          },
         },
+        data: { wasCited: true, citationContexts: item.citationContexts },
       });
     }
 
@@ -138,12 +237,13 @@ async function persistSucceededAttempt(params: {
 /**
  * The Phase 4 orchestration service: authorizes the actor, builds bounded
  * deterministic evidence and a validated model-input projection, then runs
- * the provider attempt lifecycle (create PENDING row -> audit start -> call
- * provider outside any transaction -> structural then semantic validation
- * -> persist). Retries at most once, only on a retryable failure category —
- * see errors.ts. Creates zero Decision/ProposedChange rows; this is Phase 4
- * only (analysis + mitigation options), never Phase 5's approval/apply
- * workflow. See docs/DECISIONS.md, "Phase 4 orchestration".
+ * the provider attempt lifecycle (persist PENDING row + full evidence
+ * snapshot + audit start in one transaction -> call provider outside any
+ * transaction -> structural then semantic validation -> persist). Retries
+ * at most once, only on a retryable failure category — see errors.ts.
+ * Creates zero Decision/ProposedChange rows; this is Phase 4 only (analysis
+ * + mitigation options), never Phase 5's approval/apply workflow. See
+ * docs/DECISIONS.md, "Phase 4 orchestration".
  */
 export async function runImpactAnalysis(
   eventId: string,
@@ -193,6 +293,21 @@ export async function runImpactAnalysis(
     return validationError("Failed to build a valid model-input projection for this event.");
   }
 
+  // Runtime validation of the just-built projection against its own
+  // authoritative schema — before the size check and before any attempt
+  // (analysis row, audit event, or provider call) is created. A failure
+  // here is a programming-invariant violation (buildModelInputProjection()
+  // is supposed to always produce a schema-valid result), not a normal
+  // operating condition, but it's checked rather than assumed — see
+  // docs/DECISIONS.md, "Phase 4 correction: runtime model-input
+  // validation".
+  const modelInputValidation = modelInputProjectionSchema.safeParse(modelInput);
+  if (!modelInputValidation.success) {
+    return validationError(
+      `Model input failed runtime validation: ${modelInputValidation.error.issues.map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`).join("; ")}`,
+    );
+  }
+
   const sizeCheck = checkModelInputSize(modelInput);
   if (!sizeCheck.ok) {
     return validationError(
@@ -216,30 +331,16 @@ export async function runImpactAnalysis(
     const traceId = randomUUID();
     const analysisId = `IA-${randomUUID()}`;
 
-    await prisma.impactAnalysis.create({
-      data: {
-        id: analysisId,
-        programEventId: event.id,
-        analysisRunId,
-        requestedById: actor.id,
-        traceId,
-        attempt,
-        status: "PENDING",
-        aiMode,
-        provider: provider.name,
-      },
-    });
-
-    await prisma.auditEvent.create({
-      data: {
-        traceId,
-        actorUserId: actor.id,
-        actorType: "USER",
-        action: "ANALYSIS_STARTED",
-        targetRecordId: analysisId,
-        targetRecordType: "IMPACT_ANALYSIS",
-        afterValue: { eventId: event.id, analysisRunId, attempt },
-      },
+    await persistPendingAttempt({
+      analysisId,
+      programEventId: event.id,
+      analysisRunId,
+      requestedById: actor.id,
+      traceId,
+      attempt,
+      aiMode,
+      providerName: provider.name,
+      modelInput,
     });
 
     logAnalysisEvent("analysis.started", {
@@ -280,16 +381,13 @@ export async function runImpactAnalysis(
           category = "SEMANTIC_VALIDATION_FAILED";
           safeErrors = semantic.errors;
         } else {
-          await prisma.impactAnalysis.update({
-            where: { id: analysisId },
-            data: { model: providerModel },
-          });
           await persistSucceededAttempt({
             analysisId,
             traceId,
             actorUserId: actor.id,
             eventId: event.id,
             durationMs,
+            providerModel,
             output: structural.data,
             modelInput,
           });
@@ -317,15 +415,23 @@ export async function runImpactAnalysis(
         }
       }
 
-      await prisma.impactAnalysis.update({
-        where: { id: analysisId },
-        data: { model: providerModel },
+      await persistFailedAttempt({
+        analysisId,
+        category,
+        durationMs,
+        validationErrors: safeErrors,
+        providerModel,
       });
-      await persistFailedAttempt(analysisId, category, durationMs, safeErrors);
     } catch (error) {
       const durationMs = Date.now() - startedAt;
       category = classifyProviderError(error);
-      await persistFailedAttempt(analysisId, category, durationMs, safeErrors);
+      await persistFailedAttempt({
+        analysisId,
+        category,
+        durationMs,
+        validationErrors: safeErrors,
+        providerModel,
+      });
     }
 
     await prisma.auditEvent.create({

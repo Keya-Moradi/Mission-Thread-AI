@@ -62,10 +62,14 @@ Every function returns a `ServiceResult<T>` (`{ ok: true, data } | { ok: false, 
 - `/programs/edgelink-x/analyses/[id]` — analysis workspace, `[id]` is the
   logical `analysisRunId`. All authenticated roles may view: overall run
   status, every attempt's number/status/trace ID/provider/model/duration/
-  safe failure detail, event facts, deterministic schedule/budget exposure,
-  verification gaps, assumptions, unknowns, evidence citations grouped by
-  record type, executive summary, mission impact, and — on success — exactly
-  three mitigation options with the recommended one marked
+  safe failure detail, event facts, deterministic schedule/budget exposure, a
+  persisted "program readiness at analysis time" snapshot, verification
+  gaps, assumptions, unknowns, **evidence supplied to analysis** (every
+  record the attempt's model input actually contained, each tagged "Cited
+  (‹contexts›)" or "Supplied only" from the persisted `wasCited`/
+  `citationContexts` columns — not just the cited subset), executive
+  summary, mission impact, and — on success — exactly three mitigation
+  options with the recommended one marked
   (`data-testid="mitigation-option"` / `"mitigation-recommended-badge"`, used
   by the smoke test to count real DOM elements rather than raw text
   occurrences — see the smoke-test.mjs comment on why: Next's RSC flight
@@ -73,11 +77,17 @@ Every function returns a `ServiceResult<T>` (`{ ok: true, data } | { ok: false, 
   A pending/failed run shows a safe non-success state, never a fabricated
   result.
 - `/programs/edgelink-x/briefings/[id]` — printable readiness briefing,
-  read-only, based only on a successful validated attempt. Print-specific
-  CSS (`print:hidden` on `Nav` and the page's own back-link/print-button row)
-  excludes navigation and interactive controls from the printed output. A
-  pending or failed run renders a safe "readiness briefing unavailable"
-  state with a link back to the workspace, never a fabricated completed view.
+  read-only, based only on a successful validated attempt. Displays only the
+  persisted `readinessSnapshot` (no current-state readiness calculation);
+  its "Source references"/"Relevant risks" sections are filtered to the
+  cited subset only, since a briefing is a decision document showing what
+  was actually used, not everything that was merely supplied (the full
+  supplied set is one click away, in the linked analysis workspace).
+  Print-specific CSS (`print:hidden` on `Nav` and the page's own back-link/
+  print-button row) excludes navigation and interactive controls from the
+  printed output. A pending or failed run renders a safe "readiness
+  briefing unavailable" state with a link back to the workspace, never a
+  fabricated completed view.
 
 ### Event-entry contract and mutation — implemented (Phase 3)
 
@@ -160,9 +170,12 @@ errors.ts                AiConfigurationError, AiProviderError, safe error-categ
 provider-factory.ts      resolveAiMode() (strict "mock"|"live"), createProviderFromEnv()
 mock-provider.ts         generateMockImpactAnalysis() (pure) + MockLLMProvider
 openai-provider.ts       OpenAiImpactAnalysisProvider (Responses API, live mode only)
-model-input.ts           buildModelInputProjection(), ModelInputProjection Zod schema, bounds
+openai-schema.ts         buildOpenAiImpactAnalysisJsonSchema() + OpenAI-subset verification
+model-input.ts           buildModelInputProjection(), ModelInputProjection Zod schema, bounds,
+                          readinessSnapshotSchema (also the persisted readiness-snapshot schema)
 output-schema.ts         impactAnalysisOutputSchema (the authoritative Zod output schema)
 output-validation.ts     validateImpactAnalysisSemantics() (source-ID + deterministic checks)
+attempt-persistence.ts   buildAttemptSourceReferenceSnapshot(), buildSucceededImpactAnalysisData()
 orchestrator.ts          runImpactAnalysis() — authorization, attempts, retry, persistence
 logging.ts                logAnalysisEvent() — structured JSON, injectable sink
 prompts/                 impact-analysis-system.ts, impact-analysis-user.ts
@@ -194,7 +207,11 @@ fields. Neither prompt is ever logged in full.
 
 **Output schema and validation.** `impactAnalysisOutputSchema` is `.strict()`
 throughout (no extra keys, no optional fields — `nullable()` instead),
-requires a fixed 3-tuple of mitigation options with exactly one
+requires exactly three mitigation options
+(`z.array(mitigationOptionOutputSchema).length(3)` — not `z.tuple([...])`,
+which converts to JSON Schema `prefixItems`, outside OpenAI Structured
+Outputs' supported subset; see `docs/DECISIONS.md`, "Phase 4 correction:
+mitigationOptions array instead of tuple") with exactly one
 `isRecommended: true`, fixed-2-decimal monetary strings, and documented
 length/array limits. A second, semantic pass
 (`validateImpactAnalysisSemantics()`) checks what Zod alone cannot: every
@@ -207,31 +224,78 @@ exactly equal `BudgetExposureResult.totalDeterministicExposure` — the
 persisted value is always the deterministic one, never the model's own
 copy of it, even when they agree (see `docs/DECISIONS.md`).
 
+**Provider-facing JSON Schema.** `openai-schema.ts`'s
+`buildOpenAiImpactAnalysisJsonSchema()` generates a JSON Schema from
+`impactAnalysisOutputSchema` via `z.toJSONSchema()` — still the single
+authoritative source, never a second hand-maintained schema — and then
+recursively verifies it contains none of `prefixItems`, `unevaluatedItems`,
+`contains`, `minContains`, `maxContains`, `propertyNames`,
+`patternProperties` (keywords draft-2020-12 permits but OpenAI's strict
+mode doesn't document support for), and that every object schema declares
+`additionalProperties: false` with every property listed in `required`.
+Throws rather than silently patching if a violation is ever found. Whatever
+this generates is only steering for the API — every parsed response is
+still re-validated against the authoritative Zod schema afterward,
+regardless of what the provider claims to have enforced.
+
 **Providers.** `MockLLMProvider` (`AI_MODE=mock`, default for dev/CI/tests)
 wraps the pure `generateMockImpactAnalysis()`, which never invents a value
 not already present in the deterministic input. `OpenAiImpactAnalysisProvider`
 (`AI_MODE=live`) uses the official `openai` package's Responses API with
-strict JSON-schema structured output generated from the same authoritative
-Zod schema via `z.toJSONSchema()` (never a hand-duplicated schema),
-`store: false`, no streaming/tools/web-search/conversations. No automated
-test, smoke check, or CI step ever exercises this path.
+the strict JSON-schema structured output described above, `store: false`,
+no streaming/tools/web-search/conversations. No automated test, smoke
+check, or CI step ever exercises this path.
+
+**Attempt-evidence persistence.** `attempt-persistence.ts`'s
+`buildAttemptSourceReferenceSnapshot(modelInput, output?)` builds the
+`SourceReference` rows for one attempt: called once before the provider
+call (no `output`) to produce the _complete_ supplied-evidence snapshot —
+every allowlisted record, `wasCited: false` — and again after a validated
+response (`output` present) to mark which records were actually cited and
+in which context (`"analysis"` or `"option:<index>"`, bounded fixed
+vocabulary, never model text). `buildSucceededImpactAnalysisData(output,
+modelInput)` builds a successful attempt's persisted fields, always
+sourcing `scheduleExposureDays`/`budgetExposureAmount`/`readinessSnapshot`
+from `modelInput.deterministicResults` — never from the model's own copy —
+since the application, never the model, is the source of truth for a
+deterministic calculation.
 
 **Orchestration.** `runImpactAnalysis(eventId, actorUserId, options?)`
 re-verifies the actor's current database role (only `PROGRAM_MANAGER`,
-same pattern as `recordProgramEvent()`), builds evidence and a validated
-model input, then runs an attempt loop (max 2): create a `PENDING`
-`ImpactAnalysis` row and `ANALYSIS_STARTED` audit event, call the provider
-outside any transaction, run structural then semantic validation, and
-either persist a `SUCCEEDED` result (exactly 3 `MitigationOption` rows, one
-final transaction) or a `FAILED` one (safe error category and validation
-errors only — never a raw stack trace or provider payload). One
-`analysisRunId` per logical run links an attempt and its one retry; each
-attempt keeps its own `traceId`. Retryable failure categories (transient
-provider error, malformed JSON, schema violation, invalid source IDs,
-deterministic mismatch) get exactly one retry with concise validation
-feedback; a configuration failure (missing key/model) is never retried and
-creates no `ImpactAnalysis` row at all, since there was no real attempt to
-record.
+same pattern as `recordProgramEvent()`), builds evidence, a model-input
+projection, and re-validates it at runtime against
+`modelInputProjectionSchema` before any attempt is created. Per attempt
+(max 2): one transaction creates the `PENDING` `ImpactAnalysis` row, the
+**complete** supplied-evidence `SourceReference` snapshot, and the
+`ANALYSIS_STARTED` audit event — all before the provider is ever called,
+outside any transaction. On success, a final transaction updates the
+`ImpactAnalysis` row (deterministic values, plus the readiness snapshot —
+see below), updates only the cited subset of the already-persisted
+`SourceReference` rows with citation metadata, creates exactly 3
+`MitigationOption` rows, and the `ANALYSIS_SUCCEEDED` audit event. A failed
+attempt's `SourceReference` rows are never revisited, so they correctly
+retain the complete supplied snapshot (all `wasCited: false`) alongside the
+safe error category — never a raw stack trace or provider payload. One
+`analysisRunId` per logical run links an attempt and its one retry, each
+with its own full evidence snapshot; each attempt keeps its own `traceId`.
+Retryable failure categories (transient provider error, malformed JSON,
+schema violation, invalid source IDs, deterministic mismatch) get exactly
+one retry with concise validation feedback; a configuration failure
+(missing key/model) is never retried and creates no `ImpactAnalysis` row at
+all, since there was no real attempt to record.
+
+**Immutable readiness snapshot.** `ImpactAnalysis.readinessSnapshot`
+persists `modelInput.deterministicResults.readinessScore` exactly as
+computed when the attempt ran (`readinessSnapshotSchema`, exported from
+`model-input.ts` and reused unchanged as the persisted-content schema — not
+a second representation), or a real SQL `NULL` (`Prisma.DbNull`) if
+readiness genuinely couldn't be computed. Never recalculated on read: the
+analysis workspace and the readiness briefing both display only this
+persisted value — the briefing performs no current-state readiness
+calculation at all. Verified directly: a historical analysis's stored
+snapshot is unchanged after a later program mutation that provably changes
+`calculateReadinessScore()`'s current result (see `docs/DECISIONS.md`,
+"Phase 4 correction: immutable readiness snapshot").
 
 ## Observability — implemented (Phase 4)
 

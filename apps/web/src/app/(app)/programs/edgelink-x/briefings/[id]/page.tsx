@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { prisma, PROGRAM_ID, calculateReadinessScore } from "@missionthread/core";
+import { prisma } from "@missionthread/core";
 import { requireSession } from "@/lib/auth-helpers";
 import { StatusBadge } from "@/components/status-badge";
 import { PrintButton } from "./print-button";
@@ -10,10 +10,28 @@ interface VerificationGapJson {
   summary: string;
 }
 
+interface ReadinessSnapshotJson {
+  totalScore: number;
+  factors: Array<{ label: string; score: number; detail: string }>;
+}
+
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
     : [];
+}
+
+function asReadinessSnapshot(value: unknown): ReadinessSnapshotJson | null {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("totalScore" in value) ||
+    !("factors" in value) ||
+    !Array.isArray((value as { factors: unknown }).factors)
+  ) {
+    return null;
+  }
+  return value as ReadinessSnapshotJson;
 }
 
 function asVerificationGaps(value: unknown): VerificationGapJson[] {
@@ -72,10 +90,18 @@ export default async function ReadinessBriefingPage({
     );
   }
 
-  const readinessResult = await calculateReadinessScore(PROGRAM_ID);
+  // The persisted, analysis-time snapshot — never recalculated on read, so
+  // this historical briefing stays accurate after later program changes.
+  // See docs/DECISIONS.md, "Phase 4 correction: immutable readiness
+  // snapshot". This page performs no current-state readiness calculation.
+  const readiness = asReadinessSnapshot(succeeded.readinessSnapshot);
   const event = succeeded.programEvent;
   const recommended = succeeded.mitigationOptions.find((option) => option.isRecommended);
-  const risks = succeeded.sourceReferences.filter((ref) => ref.recordType === "RISK");
+  // A briefing is a decision document — it shows what the model actually
+  // used, not everything that was merely available to it (the full
+  // supplied set is in the analysis workspace instead).
+  const citedReferences = succeeded.sourceReferences.filter((ref) => ref.wasCited);
+  const risks = citedReferences.filter((ref) => ref.recordType === "RISK");
 
   return (
     <>
@@ -124,9 +150,11 @@ export default async function ReadinessBriefingPage({
 
         <section className="mt-4 grid grid-cols-3 gap-4 border-t border-border pt-4 text-sm">
           <div>
-            <div className="text-xs tracking-wide text-muted uppercase">Program readiness</div>
+            <div className="text-xs tracking-wide text-muted uppercase">
+              Program readiness (at analysis time)
+            </div>
             <div className="mt-1 font-medium text-foreground">
-              {readinessResult.ok ? `${readinessResult.data.totalScore}/100` : "Unavailable"}
+              {readiness ? `${readiness.totalScore}/100` : "Unavailable"}
             </div>
           </div>
           <div>
@@ -232,15 +260,19 @@ export default async function ReadinessBriefingPage({
 
         <section className="mt-4 border-t border-border pt-4">
           <h2 className="text-xs font-semibold tracking-wide text-muted uppercase">
-            Source references
+            Source references (cited by this analysis)
           </h2>
-          <ul className="mt-2 flex flex-col gap-1 text-xs text-muted">
-            {succeeded.sourceReferences.map((ref) => (
-              <li key={ref.id}>
-                {ref.recordType} <span className="font-mono">{ref.recordId}</span> — {ref.summary}
-              </li>
-            ))}
-          </ul>
+          {citedReferences.length === 0 ? (
+            <p className="mt-2 text-xs text-muted">No cited source references.</p>
+          ) : (
+            <ul className="mt-2 flex flex-col gap-1 text-xs text-muted">
+              {citedReferences.map((ref) => (
+                <li key={ref.id}>
+                  {ref.recordType} <span className="font-mono">{ref.recordId}</span> — {ref.summary}
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
       </div>
     </>

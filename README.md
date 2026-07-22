@@ -316,20 +316,24 @@ All of the above are run in CI (`.github/workflows/ci.yml`) with
   analysis run (`[id]` is the logical `analysisRunId`, shared by an
   attempt and its one retry). All authenticated roles may view: run
   status, every attempt's number/status/trace ID/provider/model/duration,
-  event facts, deterministic schedule/budget exposure, verification gaps,
-  assumptions, unknowns, bounded evidence citations, executive summary,
-  mission impact, and — on success — exactly three mitigation options with
-  the recommended one clearly marked. **Program Manager only:** triggering
-  a new analysis, via an "Analyze" control on the program overview's
-  Recent Events section.
+  event facts, deterministic schedule/budget exposure, a persisted
+  readiness snapshot from when the attempt ran, verification gaps,
+  assumptions, unknowns, **the complete evidence supplied to the
+  attempt** — every record its model input contained, each marked cited
+  (with context) or supplied-only, not just the subset the model chose to
+  cite — executive summary, mission impact, and — on success — exactly
+  three mitigation options with the recommended one clearly marked.
+  **Program Manager only:** triggering a new analysis, via an "Analyze"
+  control on the program overview's Recent Events section.
 - `/programs/edgelink-x/briefings/[id]` — read-only, printable readiness
   briefing for a successfully completed analysis run. Shows the trace ID,
-  confidence, assumptions, unknowns, schedule/budget exposure, key
-  verification gaps, relevant risks, the three mitigation options and the
-  recommendation, and source references — explicit throughout that the
-  options are proposals pending human review, never an approved or applied
-  change. A pending or failed run shows a safe "briefing unavailable"
-  state instead of a fabricated completed view.
+  confidence, assumptions, unknowns, schedule/budget exposure, the same
+  persisted (never recalculated) readiness snapshot, key verification
+  gaps, cited relevant risks, the three mitigation options and the
+  recommendation, and cited source references — explicit throughout that
+  the options are proposals pending human review, never an approved or
+  applied change. A pending or failed run shows a safe "briefing
+  unavailable" state instead of a fabricated completed view.
 
 No approval, rejection, revision, or apply workflow exists yet — a
 mitigation option is a proposal only. No `Decision` or `ProposedChange` row
@@ -372,10 +376,15 @@ implementations:
 - **Live** (`AI_MODE=live`) — the official `openai` npm package's
   **Responses API**, with strict JSON-schema structured output generated
   from the same authoritative Zod schema every attempt is validated
-  against (`z.toJSONSchema()`, not a hand-duplicated schema), `store:
-false`, no streaming/tools/web search/file search/conversations. Requires
-  server-only `OPENAI_API_KEY`/`OPENAI_MODEL`. No automated test, smoke
-  check, or CI step ever exercises this path — see
+  against (`z.toJSONSchema()`, not a hand-duplicated schema) and then
+  verified against OpenAI's documented supported subset before use — no
+  `prefixItems`/`unevaluatedItems`/`contains`/`minContains`/`maxContains`/
+  `propertyNames`/`patternProperties` anywhere, every object schema
+  declares `additionalProperties: false` with every property in
+  `required` (see `packages/core/src/ai/openai-schema.ts`) — `store:
+false`, no streaming/tools/web search/file search/conversations.
+  Requires server-only `OPENAI_API_KEY`/`OPENAI_MODEL`. No automated test,
+  smoke check, or CI step ever exercises this path — see
   `packages/core/src/ai/openai-provider.ts`.
 
 Every attempt's output — from either provider — is re-validated twice

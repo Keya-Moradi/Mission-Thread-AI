@@ -82,14 +82,19 @@ export const impactAnalysisOutputSchema = z
       .array(z.string().min(1))
       .min(1, "at least one source record must be cited")
       .max(OUTPUT_LIMITS.maxSourceRecordIds),
-    // Exactly 3 — a fixed-length tuple, not a bounded array, since "exactly
-    // three mitigation options" is a hard structural requirement, not just a
-    // typical range.
-    mitigationOptions: z.tuple([
-      mitigationOptionOutputSchema,
-      mitigationOptionOutputSchema,
-      mitigationOptionOutputSchema,
-    ]),
+    // Exactly 3 — enforced with .length(3), not z.tuple(...). A tuple
+    // converts to JSON Schema's "prefixItems" (positional-item validation),
+    // which is outside OpenAI Structured Outputs' documented supported
+    // subset (see openai-schema.ts). A bounded array with minItems/maxItems
+    // both set to 3 expresses the identical "exactly three" constraint using
+    // only "items"/"minItems"/"maxItems" — a form OpenAI's strict mode does
+    // support — while Zod itself still rejects any array whose length isn't
+    // exactly 3, so nothing about the authoritative validation is weakened.
+    // See docs/DECISIONS.md, "Phase 4 correction: mitigationOptions array
+    // instead of tuple".
+    mitigationOptions: z
+      .array(mitigationOptionOutputSchema)
+      .length(3, "exactly three mitigation options are required"),
   })
   .strict()
   .refine((data) => data.mitigationOptions.filter((option) => option.isRecommended).length === 1, {

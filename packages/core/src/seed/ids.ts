@@ -110,13 +110,16 @@ export const DEMO_USER_IDS = {
 // Phase 4: the one seeded demonstration AI impact analysis, for
 // EVT-SUPPLIER-001. Its content is not hand-authored — prisma/seed.ts calls
 // the real, production buildModelInputProjection() + generateMockImpactAnalysis()
-// functions against the live seeded event and persists whatever they
-// produce, so these IDs only need to cover the fixed identifiers a demo
-// needs to link to (the run/attempt/trace and the 3 mitigation options,
-// always exactly 3) — SourceReference row IDs are derived deterministically
-// from each cited record's own (recordType, recordId) instead of being
-// pre-enumerated here, since the exact evidence citation set depends on
-// runtime data, not a fixed list.
+// + buildAttemptSourceReferenceSnapshot() functions against the live seeded
+// event and persists whatever they produce, so these IDs only need to cover
+// the fixed identifiers a demo needs to link to (the run/attempt/trace and
+// the 3 mitigation options, always exactly 3) — SourceReference row IDs are
+// derived deterministically from each supplied record's own (recordType,
+// recordId) instead of being pre-enumerated here, since the exact supplied-
+// evidence set depends on runtime data, not a fixed list. Every allowlisted
+// record gets a row (not just the ones the mock output cites) — see
+// docs/DECISIONS.md, "Phase 4 correction: complete attempt-evidence
+// persistence".
 export const ANALYSIS_IDS = {
   supplierDelay: "ANALYSIS-EVT-SUPPLIER-001",
 } as const;
