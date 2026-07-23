@@ -5,16 +5,16 @@ Phase 0 planning. Sections are marked with what phase actually builds them;
 see [`docs/TASKS.md`](TASKS.md) for what exists in the repository right now.
 As of this writing, Phase 1 (workspaces, schema, seed data, auth, base
 shell), Phase 2 (deterministic program-analysis services), Phase 3 (core
-workflow UI: dashboard, program overview, event entry, audit shell), and
-Phase 4 (AI impact analysis: provider abstraction, mock/live providers,
+workflow UI: dashboard, program overview, event entry, audit shell), Phase 4
+(AI impact analysis: provider abstraction, mock/live providers,
 structured-output validation, orchestration, analysis workspace, readiness
-briefing) are complete; the approval/apply workflow ("AI" section's
-mitigation-option → decision path) is still Phase 5, not implemented.
+briefing), and Phase 5 (approval/apply workflow: decision state machine,
+apply preview, transactional apply, append-only audit) are complete.
 
 ## Workspaces
 
-- `apps/web` — Next.js App Router UI + route handlers/server actions. _(Phase 1: scaffold, auth, base shell. Phase 3: dashboard, program overview, event entry, audit shell — done. Phase 4: Analyze trigger, analysis workspace, readiness briefing — done. Phase 5: approval UI.)_
-- `packages/core` — Zod schemas, deterministic services, AI provider abstraction, Prisma schema/client. _(Phase 1: schema, auth, seed, db-safety. Phase 2: deterministic services — done. Phase 3: event-entry contract + `recordProgramEvent()` mutation — done. Phase 4: `packages/core/src/ai` — `LLMProvider`, mock/live providers, model-input projection, output schema, semantic validation, orchestration — done.)_
+- `apps/web` — Next.js App Router UI + route handlers/server actions. _(Phase 1: scaffold, auth, base shell. Phase 3: dashboard, program overview, event entry, audit shell — done. Phase 4: Analyze trigger, analysis workspace, readiness briefing — done. Phase 5: decision page, apply-preview page, program-overview Actions section — done.)_
+- `packages/core` — Zod schemas, deterministic services, AI provider abstraction, Prisma schema/client. _(Phase 1: schema, auth, seed, db-safety. Phase 2: deterministic services — done. Phase 3: event-entry contract + `recordProgramEvent()` mutation — done. Phase 4: `packages/core/src/ai` — `LLMProvider`, mock/live providers, model-input projection, output schema, semantic validation, orchestration — done. Phase 5: `packages/core/src/approvals` — decision/proposed-change schemas, server-generated snapshots, stale-data detection, `recordMitigationDecision()`, `applyApprovedChanges()` — done.)_
 - `packages/mcp-server` — Phase 7: read-only MCP tools reusing `packages/core`. _(Not started — placeholder package only.)_
 
 ## Deterministic program-analysis services — implemented (Phase 2)
@@ -93,7 +93,7 @@ Every function returns a `ServiceResult<T>` (`{ ok: true, data } | { ok: false, 
 
 `packages/core/src/events/` — `eventEntrySchema` (a strict Zod discriminated union keyed by `eventType`, `SUPPLIER_DELAY` | `GENERAL_UPDATE`) plus `recordProgramEvent(input, actorUserId)`, the only mutation Phase 3 performs. It validates input, re-fetches the actor's role from the database on every call (never a session/JWT claim), verifies component/supplier membership in `PROGRAM-EDGELINK-X`, computes `delayDays` server-side (reusing Phase 2's `utcDayDifference()`), and writes the `ProgramEvent` plus one matching `EVENT_RECORDED` `AuditEvent` in a single Prisma transaction — the only audit mutation this phase performs, with a redacted `afterValue` payload (structured facts and `hasReason`/`hasRawNotes` booleans, never full free text). Extends the Phase 2 `ServiceResult<T>`/`DomainError` strategy with a `FORBIDDEN` code rather than inventing a second error shape. See `docs/DECISIONS.md` for the full authorization and transaction design.
 
-## Request / data flow — event intake and AI analysis implemented (Phase 3–4); approval/apply is planned (Phase 5)
+## Request / data flow — event intake through transactional apply, implemented (Phase 3–5)
 
 ```
 Program Manager submits supplier delay
@@ -121,35 +121,74 @@ Program Manager clicks "Analyze" on a recorded event
   -> apps/web: analysis workspace (/programs/edgelink-x/analyses/[id]) — every role can view
   -> apps/web: readiness briefing (/programs/edgelink-x/briefings/[id]) — printable, read-only
 
-Decision + apply-preview + transactional ProposedChange apply -> Phase 5, not implemented
+A Program Manager (or, for revision requests, Engineering Lead) opens a
+PENDING mitigation option's decision page
+  -> apps/web: decision page (.../options/[optionId]/decision) — role-gated       [Phase 5 — done]
+  -> apps/web: submitDecisionAction server action (actor ID from session only)
+  -> packages/core: recordMitigationDecision(input, actorUserId)
+       - re-verifies actor role from the database; enforces verdict permissions
+       - confirms the option is still PENDING and has no existing Decision
+       - approval only: validates every proposed change, loads/verifies each
+         target belongs to PROGRAM-EDGELINK-X, builds server-generated old/new
+         value snapshots (never trusting client-supplied old values)
+       - in one transaction: creates Decision, transitions MitigationOption
+         status, creates ProposedChange rows (approval only), creates one
+         DECISION_RECORDED AuditEvent
+  -> apps/web: apply-preview page (.../options/[optionId]/apply) — approval only,
+     read-only stale-data check against every target's current value
+
+Program Manager confirms the exact "APPLY" string and applies
+  -> apps/web: submitApplyAction server action (actor ID from session only)       [Phase 5 — done]
+  -> packages/core: applyApprovedChanges(mitigationOptionId, actorUserId, confirmation)
+       - re-verifies actor role (PROGRAM_MANAGER only) before opening a transaction
+       - in one transaction: reloads the option and its APPROVED decision, loads
+         every PENDING ProposedChange, re-checks every target against its
+         captured old value, aborts entirely on any conflict
+       - applies each domain mutation (milestone date / risk fields / budget
+         fields; NEW_ACTION mutates no domain table), marks every proposed
+         change APPLIED with one shared appliedAt, creates one CHANGES_APPLIED
+         AuditEvent linked to the Decision
+  -> apps/web: program overview's "Actions" section — applied NEW_ACTION records
 ```
 
-Event intake and AI analysis both work end-to-end and are fully auditable.
-The approval/apply path is not wired up yet — a mitigation option is a
-proposal only. No `Decision` or `ProposedChange` row exists anywhere in the
-database as of Phase 4.
+Event intake, AI analysis, and the approval/apply workflow all work
+end-to-end and are fully auditable. Every mitigation option's lifecycle —
+proposal, decision, preview, and (for approvals) application — leaves a
+complete, append-only `AuditEvent` trail.
 
-## Domain model — implemented (Phase 1)
+## Domain model — implemented (Phase 1); extended (Phase 5)
 
 See `docs/DECISIONS.md` for the approved 20-model Prisma set, the three
 merges applied to the `SPEC.md` §6 baseline (`TestResult`→`TestCase`,
 `SupplierUpdate`→`ProgramEvent`, `Approval`→`Decision`), and the
 `RecordType` allowlist design. Schema lives at
-`packages/core/prisma/schema.prisma` and is migrated/seeded.
+`packages/core/prisma/schema.prisma` and is migrated/seeded. Phase 5 added
+one migration (`20260722000000_phase5_decision_state_machine`):
+`Decision.mitigationOptionId` gained `@unique` (`MitigationOption.decision`
+is now `Decision?`, not an array — at most one decision per option, enforced
+by the database, not just application logic), `Decision.rationale` became
+required, and `ProposedChange.targetRecordId`/`targetRecordType` became
+nullable (`NEW_ACTION` has no existing record to target — see
+`docs/DECISIONS.md`, "Resolved: `ProposedChangeType.NEW_ACTION` target-field
+conflict").
 
-## Auth — implemented (Phase 1); mutation authorization — implemented (Phase 3)
+## Auth — implemented (Phase 1); mutation authorization — implemented (Phase 3–5)
 
 Auth.js Credentials provider; `crypto.scrypt` password hashes (validated
 strictly on verify — see `docs/DECISIONS.md`); JWT sessions; server-side
 session check via `auth()` in server layouts and pages. Roles: Program
-Manager (event entry — done; analysis/approval workflow — not yet built),
-Engineering Lead (read-only across Phase 3 pages), Executive Viewer
-(read-only). UI role-gating (hiding the "Record event" link/redirecting a
-non-manager away from the event-entry page) is a UX convenience only, never
-the actual authorization boundary — `recordProgramEvent()` in
-`packages/core` independently re-verifies the actor's current database
-role on every call, never trusting a session/JWT claim. See
-`docs/DECISIONS.md`, "Mutation authorization."
+Manager (event entry, analysis, decisions, apply — all done), Engineering
+Lead (read-only across Phase 3–4 pages; may request revision on a
+mitigation option), Executive Viewer (read-only everywhere, including the
+approval workflow). UI role-gating (hiding the "Record event" link/
+redirecting a non-manager away from the event-entry page; hiding
+approve/reject/apply controls from non-Program-Managers) is a UX
+convenience only, never the actual authorization boundary —
+`recordProgramEvent()`, `recordMitigationDecision()`, and
+`applyApprovedChanges()` in `packages/core` each independently re-verify
+the actor's current database role on every call, never trusting a
+session/JWT claim. See `docs/DECISIONS.md`, "Mutation authorization" and
+"Phase 5 decision permissions."
 
 ## Persistence — implemented (Phase 1)
 
@@ -338,6 +377,98 @@ calculation at all. Verified directly: a historical analysis's stored
 snapshot is unchanged after a later program mutation that provably changes
 `calculateReadinessScore()`'s current result (see `docs/DECISIONS.md`,
 "Phase 4 correction: immutable readiness snapshot").
+
+## Approval and apply workflow — implemented (Phase 5)
+
+`packages/core/src/approvals/`:
+
+```text
+schemas.ts          recordDecisionInputSchema, proposedChangeInputSchema (4-way
+                     discriminated union), rationale/confirmation constants
+snapshot.ts          buildProposedChangeSnapshot() — server-generated old/new values
+stale.ts              checkProposedChangeStale() — normalized staleness comparison
+record-decision.ts   recordMitigationDecision() — decision state machine + transaction
+apply-changes.ts      applyApprovedChanges() — transactional, all-or-nothing apply
+index.ts              public barrel
+```
+
+**State machine.** Every `MitigationOption` starts `PENDING`. Allowed
+transitions: `PENDING → APPROVED | REJECTED | REVISION_REQUESTED`; no
+transition out of a terminal state; at most one `Decision` per option,
+enforced by `Decision.mitigationOptionId @unique` at the database level
+(not just an application-layer check) — see `docs/DECISIONS.md`.
+
+**Decision permissions.** Program Manager: approve, reject, request
+revision, apply. Engineering Lead: request revision only. Executive Viewer:
+read-only. Revalidated from the database on every call, exactly like
+`recordProgramEvent()`/`runImpactAnalysis()` — never a session/JWT role
+claim.
+
+**Decision input contract.** `recordDecisionInputSchema` is a strict Zod
+discriminated union keyed by `verdict`; only `APPROVED` accepts
+`proposedChanges` (required, at least one); rationale is required on every
+verdict (10–2000 characters). Each proposed change is itself a
+discriminated union keyed by `changeType`
+(`MILESTONE_DATE`/`RISK_UPDATE`/`BUDGET_UPDATE`/`NEW_ACTION`) — the client
+may only submit the _proposed_ new value (or, for risk/budget updates, an
+allowlisted writable-field subset); `oldValue`, `targetRecordType`,
+`programId`, `status`, and every server-generated field are never part of
+this schema's shape at all.
+
+**Server-generated snapshots.** `buildProposedChangeSnapshot()` loads the
+target record, verifies program membership, and builds both `oldValue`
+(from the current database row) and `newValue` (from the validated client
+input) — the client's own claimed old value is never trusted or persisted.
+`NEW_ACTION` has no existing target (`targetRecordId`/`targetRecordType`
+nullable since the Phase 5 migration); its safe `oldValue` is always `{}`
+and its durable payload is the `ProposedChange` row's own `newValue` — no
+separate `ActionItem` model, surfaced in the program overview's "Actions"
+section.
+
+**Decision transaction.** `recordMitigationDecision()` — actor/permission
+check, option/program lookup, PENDING/no-existing-decision checks,
+proposed-change validation and snapshotting, `Decision` creation, status
+transition, `ProposedChange` creation (approval only), one
+`DECISION_RECORDED` `AuditEvent` — all in one transaction. The audit
+payload is bounded and safe (verdict, IDs, change types, a `hasRationale`
+boolean); the full rationale text stays only on the `Decision` row.
+
+**Stale-data conflict detection.** `checkProposedChangeStale()` compares a
+proposed change's captured `oldValue` against the target's current value,
+using the same normalized representation (UTC date-only strings,
+fixed-two-decimal monetary strings, Prisma enum strings) both at
+apply-preview render time (read-only) and again inside
+`applyApprovedChanges()`'s own transaction. A stale proposed change blocks
+the entire apply batch.
+
+**Apply transaction.** `applyApprovedChanges(mitigationOptionId,
+actorUserId, confirmation)` requires the exact literal `"APPLY"` — never a
+hidden Boolean. Actor/role (`PROGRAM_MANAGER` only) revalidated before any
+transaction opens. Inside one transaction: reload the option and its
+`APPROVED` decision, load every `PENDING` proposed change (require at
+least one), re-check every target for staleness, abort entirely on any
+conflict, apply each domain mutation (allowlisted fields only), mark every
+proposed change `APPLIED` with one shared `appliedAt`, create one
+`CHANGES_APPLIED` `AuditEvent` linked to the decision. No AI or network
+request runs inside this transaction.
+
+**Idempotency and concurrency.** A repeated apply finds zero `PENDING`
+proposed changes and is rejected — no duplicate mutation, audit event, or
+`appliedAt`. Two concurrent decisions on the same option: the `Decision`
+unique constraint lets only the first succeed. Two concurrent applies: a
+conditional `updateMany(... WHERE status = 'PENDING')` lets only the first
+claim the rows; the second's transaction (including any domain mutations
+already applied inside it) rolls back entirely. Database constraints and
+conditional claims throughout — never a process-local flag or lock.
+
+**Web.** `/programs/edgelink-x/analyses/[id]/options/[optionId]/decision`
+(role-gated decision controls, structured proposed-change editor — add/
+remove sections per change type, never a free-form JSON textarea) and
+`.../apply` (read-only preview for every role; apply control for Program
+Manager only; explicit "nothing has been applied yet" statement; per-change
+stale/conflict warnings). The analysis workspace shows each option's
+decision status, actor, and rationale inline. See `docs/DECISIONS.md` for
+the full design and every verified edge case.
 
 ## Observability — implemented (Phase 4)
 

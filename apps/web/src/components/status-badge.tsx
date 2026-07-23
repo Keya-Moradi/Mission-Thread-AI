@@ -26,6 +26,13 @@ const STATUS_TONES: Record<string, "danger" | "warning" | "success" | "neutral" 
   MEDIUM: "warning",
   HIGH: "danger",
   CRITICAL: "danger",
+  // Mitigation option / decision verdict / proposed-change status (Phase 5)
+  PENDING: "neutral",
+  APPROVED: "success",
+  REJECTED: "danger",
+  REVISION_REQUESTED: "warning",
+  APPLIED: "success",
+  CONFLICT: "danger",
 };
 
 const TONE_CLASSES: Record<string, string> = {

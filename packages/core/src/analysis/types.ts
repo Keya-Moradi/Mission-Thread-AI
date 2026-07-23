@@ -9,7 +9,7 @@ import type { RecordTypeValue } from "../record-types";
  */
 export type ServiceResult<T> = { ok: true; data: T } | { ok: false; error: DomainError };
 
-export type DomainErrorCode = "NOT_FOUND" | "VALIDATION_ERROR" | "FORBIDDEN";
+export type DomainErrorCode = "NOT_FOUND" | "VALIDATION_ERROR" | "FORBIDDEN" | "CONFLICT";
 
 export interface DomainError {
   code: DomainErrorCode;
@@ -54,6 +54,22 @@ export function validationError<T>(message: string): ServiceResult<T> {
  */
 export function forbidden<T>(message: string): ServiceResult<T> {
   return { ok: false, error: { code: "FORBIDDEN", message } };
+}
+
+/**
+ * For a mutation that can no longer proceed because the record it targets
+ * changed after the decision/approval that authorized it was made — see
+ * Phase 5 stale-data conflict detection in docs/DECISIONS.md. Distinct from
+ * `VALIDATION_ERROR` (malformed input) and `NOT_FOUND` (record never
+ * existed): a `CONFLICT` record exists and the input is well-formed, but
+ * applying it now would silently overwrite a change nobody approved.
+ */
+export function conflict<T>(
+  entityType: DomainError["entityType"],
+  entityId: string,
+  message: string,
+): ServiceResult<T> {
+  return { ok: false, error: { code: "CONFLICT", entityType, entityId, message } };
 }
 
 /**

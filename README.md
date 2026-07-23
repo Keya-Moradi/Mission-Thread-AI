@@ -15,20 +15,22 @@ program, customer, classified system, or export-controlled detail.
 
 ## Project status
 
-**Phase 4 of 8 (AI impact analysis) — complete.** Workspaces, database
+**Phase 5 of 8 (Approval and audit) — complete.** Workspaces, database
 schema, deterministic seed data, authentication, the full deterministic
 program-analysis service layer (`packages/core/src/analysis`), a real
 database-driven dashboard/program overview/event-entry form/audit shell,
-and now a full AI impact-analysis pipeline (`packages/core/src/ai`) all
+a full AI impact-analysis pipeline (`packages/core/src/ai`), and now the
+complete human approval/apply workflow (`packages/core/src/approvals`) all
 exist and are verified working. A Program Manager can record a
-supplier-delay or general-update event and trigger an impact analysis on
-it; the analysis runs through a bounded deterministic-evidence projection,
-a mock or live LLM provider, strict structured-output validation, and
-source-ID/deterministic-value semantic validation before exactly three
-mitigation options are persisted and shown in an analysis workspace and a
-printable readiness briefing. There is still no approval/rejection/apply
-workflow — mitigation options are proposals only; see
-[Phase roadmap](#phase-roadmap) and [Limitations](#limitations) below.
+supplier-delay or general-update event, trigger an impact analysis on it,
+and — once it succeeds — record a decision (approve with structured
+proposed changes, reject, or request revision) on each of the three
+mitigation options; an Engineering Lead may request revision. An approval
+is reviewed on a read-only apply-preview page (old vs. proposed values,
+stale-data warnings) before a Program Manager types an exact confirmation
+and applies it, transactionally and atomically, to the real milestone,
+risk, or budget data — every step producing an append-only audit record.
+See [Phase roadmap](#phase-roadmap) and [Limitations](#limitations) below.
 
 Development follows a phase-gated process defined in
 [`PROJECT_GUIDE.md`](PROJECT_GUIDE.md) and [`docs/SPEC.md`](docs/SPEC.md):
@@ -51,7 +53,11 @@ three mitigation options → approval → apply preview → audit
 Every normal calculation (schedule exposure, budget exposure, risk scoring,
 readiness) is deterministic code, never an LLM guess. The AI layer only
 explains evidence and proposes options — it can never mutate program data,
-approve anything, or apply a change.
+approve anything, or apply a change. Every mutation past that point is a
+real, revalidated human action: only a Program Manager (or, for revision
+requests, an Engineering Lead) can record a decision, and only a Program
+Manager can apply one, after typing an exact confirmation on a page that
+states nothing has been applied yet.
 
 ## Architecture
 
@@ -60,11 +66,13 @@ npm workspaces monorepo:
 ```
 apps/web              Next.js App Router UI, route handlers, server actions
                         (dashboard, program overview, event entry, audit — Phase 3, done;
-                        analysis trigger, analysis workspace, readiness briefing — Phase 4, done)
+                        analysis trigger, analysis workspace, readiness briefing — Phase 4, done;
+                        decision page, apply-preview page, Actions section — Phase 5, done)
 packages/core          Zod schemas, deterministic services (Phase 2, done),
                         event-entry contract + recordProgramEvent (Phase 3, done),
                         AI provider abstraction + mock/live providers + orchestration
                         (packages/core/src/ai — Phase 4, done),
+                        approval/apply workflow (packages/core/src/approvals — Phase 5, done),
                         Prisma schema/client
 packages/mcp-server     Read-only MCP server (placeholder — built in Phase 7)
 docs/                   Spec, plans, tasks, decisions, architecture, threat model
@@ -85,7 +93,7 @@ Full request/data flow and the Prisma domain model are documented in
 - Auth.js v5 (Credentials provider, JWT sessions)
 - Zod for all external input/output validation
 - Tailwind CSS
-- Vitest (unit tests); Playwright (Phase 5+)
+- Vitest (unit/integration tests); Playwright (`apps/web/e2e`, one happy-path test)
 - Docker Compose (local Postgres); GitHub Actions (CI)
 - Structured JSON logging (`packages/core/src/ai/logging.ts`)
 - `openai` npm package (Responses API, live AI mode only)
@@ -268,6 +276,7 @@ npm run typecheck     # tsc --noEmit across all workspaces
 npm run test           # Vitest unit tests (packages/core)
 npm run build           # production build of apps/web
 npm run smoke:test     # build + automated end-to-end smoke test
+npm run test:e2e       # build + Playwright happy-path test (resets missionthread_test first)
 ```
 
 `smoke:test` builds the production app, then runs
@@ -278,16 +287,27 @@ unauthenticated redirects to `/login` (verifying both the redirect status
 and the actual destination), invalid credentials failing safely, valid
 seeded credentials authenticating, session contents (user ID and role),
 the authenticated dashboard rendering real seeded data, protected nav
-routes, and sign-out actually invalidating the session — run against the
-dedicated test database, never the dev database. The exact number of
-checks isn't documented here since it isn't maintained from one
+routes, role-based approval-workflow controls (against small, cleaned-up
+test fixtures), and sign-out actually invalidating the session — run
+against the dedicated test database, never the dev database. It never
+submits a decision or apply form (no destructive application). The exact
+number of checks isn't documented here since it isn't maintained from one
 authoritative source; read `apps/web/scripts/smoke-test.mjs` for the
 current, complete list.
 
-All of the above are run in CI (`.github/workflows/ci.yml`) with
-`AI_MODE=mock`, so the pipeline never needs a live model API key.
+`test:e2e` resets and reseeds `missionthread_test` (via the same
+`db:reset:test` command above, run automatically by Playwright's global
+setup), then drives a real Chromium browser through the one true
+end-to-end path this repository has: sign in, approve a mitigation option
+with a proposed change, review the apply preview, type the exact `APPLY`
+confirmation, apply it, and verify the change actually took effect and is
+fully audited. Not wired into CI yet — see `apps/web/e2e/` and
+`docs/DECISIONS.md`.
 
-## Current routes and functionality (Phase 4)
+All of the above except `test:e2e` are run in CI (`.github/workflows/ci.yml`)
+with `AI_MODE=mock`, so the pipeline never needs a live model API key.
+
+## Current routes and functionality (Phase 5)
 
 - `/login` — Credentials sign-in (Zod-validated, scrypt + `timingSafeEqual`
   password verification, JWT session).
@@ -333,11 +353,34 @@ All of the above are run in CI (`.github/workflows/ci.yml`) with
   recommendation, and cited source references — explicit throughout that
   the options are proposals pending human review, never an approved or
   applied change. A pending or failed run shows a safe "briefing
-  unavailable" state instead of a fabricated completed view.
+  unavailable" state instead of a fabricated completed view. Each
+  mitigation option now also shows its current decision status and, once
+  decided, the actor/time/rationale.
+- `/programs/edgelink-x/analyses/[id]/options/[optionId]/decision` — record
+  a decision on one `PENDING` mitigation option. **Program Manager:**
+  approve (with a structured proposed-change editor — add/remove
+  milestone-date/risk-update/budget-update/new-action sections, never a
+  free-form JSON textarea), reject, or request revision. **Engineering
+  Lead:** request revision only. **Executive Viewer:** read-only, no
+  controls shown. Once decided, the page shows the decision on record
+  instead of a form — a mitigation option accepts at most one decision,
+  enforced by the database.
+- `/programs/edgelink-x/analyses/[id]/options/[optionId]/apply` — read-only
+  apply preview for an approved option, viewable by every role: decision
+  rationale and trace ID, every proposed change's target/captured-old/
+  proposed-new value, and a stale-data warning if the underlying record
+  changed since approval. Explicitly states nothing has been applied yet.
+  **Program Manager only:** an apply control that requires typing the
+  exact confirmation string before it activates; applies every proposed
+  change transactionally and atomically, or none at all.
+- `/programs/edgelink-x` — the program overview above also gained an
+  "Actions" section listing every applied `NEW_ACTION` proposed change
+  (title, description, due date, applied date) — the applied
+  `ProposedChange` row itself is the durable record for this MVP; there is
+  no separate action-tracking table.
 
-No approval, rejection, revision, or apply workflow exists yet — a
-mitigation option is a proposal only. No `Decision` or `ProposedChange` row
-is ever created by anything in this phase.
+Every decision and apply action produces its own append-only audit
+record (`DECISION_RECORDED`, `CHANGES_APPLIED`), visible on `/audit`.
 
 ## Security and authorization
 
@@ -349,16 +392,23 @@ is ever created by anything in this phase.
   Credentials-only setup).
 - All input to the Credentials provider is validated with Zod before it
   touches the database.
-- Authorization is enforced server-side on the one mutation that exists so
-  far (`recordProgramEvent()`, event entry): it re-fetches the actor's
+- Authorization is enforced server-side on every mutation
+  (`recordProgramEvent()`, `runImpactAnalysis()`, `recordMitigationDecision()`,
+  `applyApprovedChanges()`): each independently re-fetches the actor's
   current role from the database on every call, never trusting a
   session/JWT claim that could be stale. UI role-gating (hiding the
   "Record event" link, redirecting a non-manager away from the event-entry
-  page) is a convenience only, never treated as sufficient on its own — see
-  `docs/DECISIONS.md`, "Mutation authorization." No Next.js middleware/proxy
-  is used for auth in this phase — `auth()` is called directly in server
-  layouts and pages, which keeps Prisma and `node:crypto` out of the Edge
-  runtime entirely.
+  page, hiding approve/reject/apply controls) is a convenience only, never
+  treated as sufficient on its own — see `docs/DECISIONS.md`, "Mutation
+  authorization" and "Phase 5 decision permissions." No Next.js
+  middleware/proxy is used for auth in this phase — `auth()` is called
+  directly in server layouts and pages, which keeps Prisma and
+  `node:crypto` out of the Edge runtime entirely.
+- Applying approved changes requires an exact, explicit confirmation string
+  typed into a real form field — never a hidden Boolean the server would
+  otherwise have no way to distinguish from an unattended default — and is
+  atomic and all-or-nothing: a single stale or invalid proposed change
+  blocks the entire batch, never a partial apply.
 
 ## Mock vs. live AI
 
@@ -408,16 +458,24 @@ and `docs/ARCHITECTURE.md`.
 
 ## Limitations
 
-- **Phase 1–4 build.** The deterministic program-logic services
+- **Phase 1–5 build.** The deterministic program-logic services
   (traceability, dependency chains, verification gaps, related defects,
   schedule/budget exposure, risk scoring, readiness scoring, bounded
   evidence assembly) exist in `packages/core/src/analysis`, a real
   dashboard/program overview/event-entry form/audit shell call them
-  against live Postgres data, and a full AI impact-analysis pipeline
-  (`packages/core/src/ai`) now produces persisted, validated mitigation
-  options. There is still no approval/rejection/revision workflow and no
-  apply/transactional-change path — a mitigation option is a proposal only,
-  and no `Decision`/`ProposedChange` row is ever created (Phase 5+).
+  against live Postgres data, a full AI impact-analysis pipeline
+  (`packages/core/src/ai`) produces persisted, validated mitigation
+  options, and the complete human approval/apply workflow
+  (`packages/core/src/approvals`) now takes an approved option through a
+  transactional, audited domain mutation. Security hardening beyond what
+  each phase has already built (a full threat model, prompt-injection
+  defenses, rate limiting) is Phase 6+.
+- **`NEW_ACTION` proposed changes have no dedicated domain table.** For
+  this MVP, an applied `NEW_ACTION`'s own `ProposedChange` row (its
+  `newValue` JSON) is the durable record, surfaced only in the program
+  overview's "Actions" section — there is no independent action
+  status/assignee lifecycle. See `docs/DECISIONS.md` if this ever needs to
+  become a real model.
 - **Live AI mode is unverified against the real OpenAI API in this
   repository.** The Responses API request shape and the strict JSON-schema
   structured-output configuration were built against the `openai` npm
@@ -440,9 +498,12 @@ and `docs/ARCHITECTURE.md`.
 - **In-memory rate limiting (Phase 6+) will be single-process only** — not
   suitable for a horizontally scaled deployment, and will be documented as
   such when built.
-- **Audit append-only-ness (Phase 5+) is enforced at the application layer
-  only** — no update/delete route will exist, but this is not cryptographic
-  immutability.
+- **Audit append-only-ness is enforced at the application layer only** — no
+  update/delete route exists anywhere for `AuditEvent`, but this is not
+  cryptographic immutability; see `docs/THREAT_MODEL.md` (Phase 6).
+- **The Playwright end-to-end suite is not wired into CI yet** — it's a
+  local/manual check (`npm run test:e2e`) for now; Phase 8 owns full CI
+  browser-test expansion.
 - Three known **moderate npm audit advisories** exist in transitive
   dev-tooling dependencies (an optional nested `@prisma/dev` → old
   `@hono/node-server`, and Next's internally bundled `postcss` copy). Both
@@ -461,7 +522,7 @@ and `docs/ARCHITECTURE.md`.
 | **2** | **Deterministic program logic (traceability/schedule/budget/risk/readiness/evidence) — done** |
 | **3** | **Core workflow UI (dashboard, event entry, audit shell on real data) — done**                |
 | **4** | **AI impact analysis (LLMProvider, mock/live, structured output, retry) — done**              |
-| 5     | Approval and audit (state machine, apply preview, append-only audit)                          |
+| **5** | **Approval and audit (state machine, apply preview, transactional apply, audit) — done**      |
 | 6     | Security and evals (threat model, prompt-injection defenses, evals)                           |
 | 7     | Graph and MCP (React Flow thread view, read-only MCP server)                                  |
 | 8     | Delivery (full CI, Docker, browser tests, live eval, polish)                                  |

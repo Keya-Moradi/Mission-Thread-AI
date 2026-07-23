@@ -90,13 +90,10 @@ enum ApprovalState {
   REVISION_REQUESTED
 }
 
-// NEW_ACTION conflicts with ProposedChange.targetRecordId/targetRecordType
-// being non-nullable below — a new action has no existing record to target.
-// Deferred to Phase 5: make those two fields nullable and validate with a
-// Zod discriminated union keyed by changeType (see docs/DECISIONS.md,
-// 2026-07-18 "Deferred: ProposedChangeType.NEW_ACTION target-field conflict").
-// Not fixed now because the Phase 5 workflow code that would create these
-// rows doesn't exist yet to validate the right shape against.
+// NEW_ACTION has no existing record to target, unlike the other three
+// change types — see ProposedChange.targetRecordId/targetRecordType below
+// (nullable specifically for NEW_ACTION) and docs/DECISIONS.md, "Phase 5:
+// resolved ProposedChangeType.NEW_ACTION target-field conflict".
 enum ProposedChangeType {
   MILESTONE_DATE
   RISK_UPDATE
@@ -163,9 +160,9 @@ model User {
   passwordHash String
   createdAt    DateTime @default(now())
 
-  createdEvents    ProgramEvent[]   @relation("EventCreatedBy")
-  decisions        Decision[]       @relation("DecisionActor")
-  auditEvents      AuditEvent[]     @relation("AuditActorUser")
+  createdEvents     ProgramEvent[]   @relation("EventCreatedBy")
+  decisions         Decision[]       @relation("DecisionActor")
+  auditEvents       AuditEvent[]     @relation("AuditActorUser")
   requestedAnalyses ImpactAnalysis[] @relation("AnalysisRequestedBy")
 
   @@index([role])
@@ -200,7 +197,7 @@ model Component {
   subsystem   String
   description String
 
-  program      Program                 @relation(fields: [programId], references: [id])
+  program      Program                @relation(fields: [programId], references: [id])
   requirements RequirementComponent[]
   milestones   Milestone[]
   risks        Risk[]
@@ -218,7 +215,7 @@ model Requirement {
   priority    String
   status      String
 
-  program    Program                 @relation(fields: [programId], references: [id])
+  program    Program                @relation(fields: [programId], references: [id])
   components RequirementComponent[]
   testCases  TestRequirement[]
 
@@ -291,10 +288,10 @@ model Risk {
 }
 
 model Supplier {
-  id      String @id
+  id        String @id
   programId String
-  name    String
-  contact String
+  name      String
+  contact   String
 
   program Program        @relation(fields: [programId], references: [id])
   events  ProgramEvent[]
@@ -402,20 +399,20 @@ model ProgramEvent {
 // new `analysisRunId` — see docs/DECISIONS.md, "Phase 4 analysisRunId
 // grouping key" (supersedes the deferred-work note this replaced).
 model ImpactAnalysis {
-  id                   String            @id @default(cuid())
+  id                   String           @id @default(cuid())
   programEventId       String
   analysisRunId        String
   requestedById        String
-  traceId              String            @unique
+  traceId              String           @unique
   status               AnalysisStatus
   aiMode               String
   provider             String?
   model                String?
-  attempt              Int               @default(1)
+  attempt              Int              @default(1)
   executiveSummary     String?
   missionImpact        String?
   scheduleExposureDays Int?
-  budgetExposureAmount Decimal?          @db.Decimal(12, 2)
+  budgetExposureAmount Decimal?         @db.Decimal(12, 2)
   verificationGaps     Json?
   assumptions          Json?
   unknowns             Json?
@@ -430,7 +427,7 @@ model ImpactAnalysis {
   validationErrors     Json?
   errorCategory        String?
   durationMs           Int?
-  createdAt            DateTime          @default(now())
+  createdAt            DateTime         @default(now())
 
   programEvent      ProgramEvent       @relation(fields: [programEventId], references: [id])
   requestedBy       User               @relation("AnalysisRequestedBy", fields: [requestedById], references: [id])
@@ -481,31 +478,40 @@ model SourceReference {
 }
 
 model MitigationOption {
-  id                String            @id @default(cuid())
-  impactAnalysisId  String
-  optionIndex       Int
-  title             String
-  description       String
-  tradeoffs         String
-  costImpact        Decimal?          @db.Decimal(12, 2)
-  scheduleImpact    Int?
-  isRecommended     Boolean           @default(false)
-  status            MitigationStatus  @default(PENDING)
+  id               String           @id @default(cuid())
+  impactAnalysisId String
+  optionIndex      Int
+  title            String
+  description      String
+  tradeoffs        String
+  costImpact       Decimal?         @db.Decimal(12, 2)
+  scheduleImpact   Int?
+  isRecommended    Boolean          @default(false)
+  status           MitigationStatus @default(PENDING)
 
   impactAnalysis  ImpactAnalysis   @relation(fields: [impactAnalysisId], references: [id])
   proposedChanges ProposedChange[]
-  decisions       Decision[]
+  // At most one Decision per option — see docs/DECISIONS.md, "Phase 5 state
+  // machine": PENDING can transition to exactly one terminal state, enforced
+  // by Decision.mitigationOptionId's @unique constraint below.
+  decision        Decision?
 
   @@unique([impactAnalysisId, optionIndex])
   @@index([status])
 }
 
+// targetRecordId/targetRecordType are nullable specifically for NEW_ACTION,
+// which has no existing record to target — every other changeType requires
+// both fields. Enforced by the discriminated-union Zod schema in
+// packages/core/src/approvals/, not by the database (Prisma has no
+// conditional-nullability constraint). See docs/DECISIONS.md, "Phase 5:
+// resolved ProposedChangeType.NEW_ACTION target-field conflict".
 model ProposedChange {
   id                 String               @id @default(cuid())
   mitigationOptionId String
   changeType         ProposedChangeType
-  targetRecordId     String
-  targetRecordType   RecordType
+  targetRecordId     String?
+  targetRecordType   RecordType?
   oldValue           Json
   newValue           Json
   status             ProposedChangeStatus @default(PENDING)
@@ -519,12 +525,18 @@ model ProposedChange {
 
 // Approval merged into Decision (see docs/DECISIONS.md, 2026-07-17): one row
 // per approve/reject/request-revision action instead of two 1:1 tables.
+// mitigationOptionId is @unique (not just indexed) so the database itself
+// enforces the one-decision-per-option rule — see docs/DECISIONS.md, "Phase
+// 5 state machine".
 model Decision {
   id                 String        @id @default(cuid())
-  mitigationOptionId String
+  mitigationOptionId String        @unique
   actorUserId        String
   verdict            ApprovalState
-  rationale          String?
+  // Required for every decision (approve, reject, and request-revision all
+  // need a documented reason) — see docs/DECISIONS.md, "Phase 5 decision
+  // validation contract". Length bounds enforced at the Zod layer.
+  rationale          String
   traceId            String
   createdAt          DateTime      @default(now())
 
@@ -532,7 +544,6 @@ model Decision {
   actor            User             @relation("DecisionActor", fields: [actorUserId], references: [id])
   auditEvents      AuditEvent[]
 
-  @@index([mitigationOptionId])
   @@index([traceId])
 }
 

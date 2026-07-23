@@ -17,6 +17,7 @@ async function loadProgramOverviewData() {
     budgetItems,
     suppliers,
     recentEvents,
+    appliedActions,
   ] = await Promise.all([
     prisma.program.findUnique({ where: { id: PROGRAM_ID } }),
     prisma.component.findMany({
@@ -109,6 +110,19 @@ async function loadProgramOverviewData() {
         supplier: { select: { name: true } },
       },
     }),
+    // Applied NEW_ACTION proposed changes have no domain table of their own
+    // — the applied ProposedChange row itself is the durable action record
+    // for this MVP (see docs/DECISIONS.md, "Phase 5 NEW_ACTION
+    // representation"), so this is their only display surface.
+    prisma.proposedChange.findMany({
+      where: {
+        changeType: "NEW_ACTION",
+        status: "APPLIED",
+        mitigationOption: { impactAnalysis: { programEvent: { programId: PROGRAM_ID } } },
+      },
+      orderBy: { appliedAt: "desc" },
+      select: { id: true, newValue: true, appliedAt: true },
+    }),
   ]);
 
   const requirementIds = requirements.map((r) => r.id);
@@ -132,9 +146,33 @@ async function loadProgramOverviewData() {
     budgetItems,
     suppliers,
     recentEvents,
+    appliedActions,
     gapByRequirementId,
     milestoneNameById,
     componentNameById,
+  };
+}
+
+interface AppliedActionValue {
+  title: string;
+  description: string;
+  dueDate: string | null;
+}
+
+function asAppliedActionValue(value: unknown): AppliedActionValue | null {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("title" in value) ||
+    !("description" in value)
+  ) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    title: typeof record.title === "string" ? record.title : "",
+    description: typeof record.description === "string" ? record.description : "",
+    dueDate: typeof record.dueDate === "string" ? record.dueDate : null,
   };
 }
 
@@ -348,6 +386,39 @@ export default async function ProgramOverviewPage({
             </li>
           ))}
         </ul>
+      </Section>
+
+      {/* Actions (applied NEW_ACTION proposed changes) */}
+      <Section title="Actions">
+        {data.appliedActions.length === 0 ? (
+          <EmptyState message="No actions have been applied yet." />
+        ) : (
+          <ul className="mt-3 flex flex-col gap-2">
+            {data.appliedActions.map((action) => {
+              const value = asAppliedActionValue(action.newValue);
+              if (!value) return null;
+              return (
+                <li
+                  key={action.id}
+                  className="rounded-md border border-border bg-background p-3 text-sm"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium text-foreground">{value.title}</span>
+                    {value.dueDate && (
+                      <span className="text-xs text-muted">Due {value.dueDate}</span>
+                    )}
+                  </div>
+                  <p className="mt-1 text-xs text-foreground">{value.description}</p>
+                  {action.appliedAt && (
+                    <p className="mt-1 text-xs text-muted">
+                      Applied {formatDate(action.appliedAt)}
+                    </p>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </Section>
 
       {/* Recent events */}

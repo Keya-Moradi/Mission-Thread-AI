@@ -55,7 +55,13 @@ async function loadAnalysisRun(analysisRunId: string) {
     where: { analysisRunId },
     orderBy: { attempt: "asc" },
     include: {
-      mitigationOptions: { orderBy: { optionIndex: "asc" } },
+      mitigationOptions: {
+        orderBy: { optionIndex: "asc" },
+        include: {
+          decision: { include: { actor: { select: { name: true } } } },
+          proposedChanges: { select: { id: true } },
+        },
+      },
       sourceReferences: { orderBy: [{ recordType: "asc" }, { recordId: "asc" }] },
       programEvent: { include: { component: true, supplier: true } },
       requestedBy: { select: { name: true, email: true } },
@@ -273,14 +279,17 @@ export default async function AnalysisWorkspacePage({
                 >
                   <div className="flex items-center justify-between gap-2">
                     <h3 className="font-medium text-foreground">{option.title}</h3>
-                    {option.isRecommended && (
-                      <span
-                        data-testid="mitigation-recommended-badge"
-                        className="rounded-full bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent"
-                      >
-                        Recommended
-                      </span>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {option.isRecommended && (
+                        <span
+                          data-testid="mitigation-recommended-badge"
+                          className="rounded-full bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent"
+                        >
+                          Recommended
+                        </span>
+                      )}
+                      <StatusBadge status={option.status} />
+                    </div>
                   </div>
                   <p className="mt-2 text-foreground">{option.description}</p>
                   <p className="mt-2 text-xs text-muted">Tradeoffs: {option.tradeoffs}</p>
@@ -298,9 +307,44 @@ export default async function AnalysisWorkspacePage({
                         : "Not estimated"}
                     </span>
                   </dl>
-                  <p className="mt-3 text-xs text-muted italic">
-                    Proposal pending human review — this is not an approval or applied change.
-                  </p>
+
+                  {option.decision ? (
+                    <div className="mt-3 rounded-md border border-border bg-surface p-2 text-xs text-muted">
+                      <p>
+                        Decided by{" "}
+                        <span className="text-foreground">{option.decision.actor.name}</span> on{" "}
+                        {option.decision.createdAt.toISOString().slice(0, 10)} ·{" "}
+                        {option.proposedChanges.length} proposed change(s)
+                      </p>
+                      <Link
+                        href={`/programs/edgelink-x/analyses/${encodeURIComponent(analysisRunId)}/options/${encodeURIComponent(option.id)}/decision`}
+                        className="mt-1 inline-block text-accent hover:underline"
+                      >
+                        View decision
+                      </Link>
+                      {option.status === "APPROVED" && (
+                        <>
+                          {" · "}
+                          <Link
+                            href={`/programs/edgelink-x/analyses/${encodeURIComponent(analysisRunId)}/options/${encodeURIComponent(option.id)}/apply`}
+                            className="text-accent hover:underline"
+                          >
+                            Apply preview
+                          </Link>
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="mt-3 text-xs text-muted italic">
+                      Awaiting human review — this is not an approval or applied change.{" "}
+                      <Link
+                        href={`/programs/edgelink-x/analyses/${encodeURIComponent(analysisRunId)}/options/${encodeURIComponent(option.id)}/decision`}
+                        className="text-accent not-italic hover:underline"
+                      >
+                        Record a decision
+                      </Link>
+                    </p>
+                  )}
                 </div>
               ))}
             </div>

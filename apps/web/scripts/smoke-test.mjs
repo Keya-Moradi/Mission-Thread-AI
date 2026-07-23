@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { config as loadEnv } from "dotenv";
+import pg from "pg";
 
 const appDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const rootDir = path.resolve(appDir, "..", "..");
@@ -54,6 +55,7 @@ const DEMO_ROLE = "PROGRAM_MANAGER";
 // Same shared demo password as the Program Manager — used only to prove
 // role-based access differs, never to submit anything.
 const ENGINEERING_LEAD_EMAIL = "lead@missionthread.example";
+const EXECUTIVE_VIEWER_EMAIL = "exec@missionthread.example";
 
 // The one seeded demonstration analysis (packages/core/prisma/seed.ts,
 // packages/core/src/seed/ids.ts) — fixed IDs, so this smoke test can assert
@@ -63,6 +65,12 @@ const ENGINEERING_LEAD_EMAIL = "lead@missionthread.example";
 // views of the already-seeded fixture, never a fresh Analyze submission.
 const SEEDED_ANALYSIS_RUN_ID = "RUN-EVT-SUPPLIER-001";
 const SEEDED_ANALYSIS_TRACE_ID = "TRACE-ANALYSIS-EVT-SUPPLIER-001";
+const SEEDED_ANALYSIS_ID = "ANALYSIS-EVT-SUPPLIER-001";
+const SEEDED_MITIGATION_OPTION_ID = "MIT-EVT-SUPPLIER-001-1";
+// A real seeded milestone — only ever referenced by a Decision's captured
+// oldValue in this script, never mutated (applyApprovedChanges() is
+// deliberately never called here — see "Phase 5 approval workflow" below).
+const SEEDED_MILESTONE_ID = "MS-001";
 
 let failureCount = 0;
 
@@ -157,6 +165,99 @@ class CookieJar {
 
   hasSessionCookie() {
     return [...this.#cookies.keys()].some((name) => name.includes("session-token"));
+  }
+}
+
+/**
+ * Bounded, cleaned-up-afterward test fixtures for the Phase 5 approval
+ * workflow checks below — inserted directly via `pg` (not Prisma/tsx —
+ * this script stays a plain Node script, run with plain `node`, matching
+ * its original Phase 1 design decision, see docs/DECISIONS.md), and always
+ * against `DATABASE_URL` as already forced to `.env.test` above, never the
+ * dev database. Deliberately never calls applyApprovedChanges() or submits
+ * the real decision/apply forms — this checks read-only page rendering
+ * only ("without destructive application"); the one live end-to-end
+ * approve → apply flow is covered by the Playwright happy-path test
+ * instead (packages/core Server Actions have no stable external HTTP
+ * contract this script could reproduce without a real browser).
+ */
+class Phase5Fixtures {
+  #client;
+
+  constructor(databaseUrl) {
+    this.#client = new pg.Client({ connectionString: databaseUrl });
+  }
+
+  async connect() {
+    await this.#client.connect();
+  }
+
+  async createPendingOption(id, optionIndex) {
+    await this.#client.query(
+      `INSERT INTO "MitigationOption"
+         (id, "impactAnalysisId", "optionIndex", title, description, tradeoffs, "isRecommended", status)
+       VALUES ($1, $2, $3, $4, $5, $6, false, 'PENDING')`,
+      [
+        id,
+        SEEDED_ANALYSIS_ID,
+        optionIndex,
+        "Smoke-test mitigation option",
+        "Created by apps/web/scripts/smoke-test.mjs; safe to delete.",
+        "None — test fixture.",
+      ],
+    );
+  }
+
+  async createApprovedOptionWithProposedChange(
+    optionId,
+    optionIndex,
+    decisionId,
+    proposedChangeId,
+  ) {
+    await this.createPendingOption(optionId, optionIndex);
+    await this.#client.query(
+      `INSERT INTO "Decision" (id, "mitigationOptionId", "actorUserId", verdict, rationale, "traceId")
+       VALUES ($1, $2, $3, 'APPROVED', $4, $5)`,
+      [
+        decisionId,
+        optionId,
+        DEMO_USER_ID,
+        "Approved by the Phase 5 smoke-test fixture; safe to delete.",
+        `TRACE-SMOKE-${decisionId}`,
+      ],
+    );
+    await this.#client.query(`UPDATE "MitigationOption" SET status = 'APPROVED' WHERE id = $1`, [
+      optionId,
+    ]);
+    await this.#client.query(
+      `INSERT INTO "ProposedChange"
+         (id, "mitigationOptionId", "changeType", "targetRecordId", "targetRecordType", "oldValue", "newValue", status)
+       VALUES ($1, $2, 'MILESTONE_DATE', $3, 'MILESTONE', $4, $5, 'PENDING')`,
+      [
+        proposedChangeId,
+        optionId,
+        SEEDED_MILESTONE_ID,
+        JSON.stringify({ currentDate: "2026-09-15" }),
+        JSON.stringify({ currentDate: "2026-12-01" }),
+      ],
+    );
+  }
+
+  async cleanup(optionIds) {
+    await this.#client.query(`DELETE FROM "AuditEvent" WHERE "targetRecordId" = ANY($1)`, [
+      optionIds,
+    ]);
+    await this.#client.query(`DELETE FROM "ProposedChange" WHERE "mitigationOptionId" = ANY($1)`, [
+      optionIds,
+    ]);
+    await this.#client.query(`DELETE FROM "Decision" WHERE "mitigationOptionId" = ANY($1)`, [
+      optionIds,
+    ]);
+    await this.#client.query(`DELETE FROM "MitigationOption" WHERE id = ANY($1)`, [optionIds]);
+  }
+
+  async end() {
+    await this.#client.end();
   }
 }
 
@@ -442,6 +543,120 @@ async function main() {
       "Program Manager does see an Analyze control on the program overview",
       programHtml.includes(">Analyze<"),
     );
+
+    console.log("\nPhase 5 approval workflow — unauthenticated access:");
+    const decisionUnauth = await fetch(
+      `${BASE_URL}/programs/edgelink-x/analyses/${SEEDED_ANALYSIS_RUN_ID}/options/${SEEDED_MITIGATION_OPTION_ID}/decision`,
+      { redirect: "manual" },
+    );
+    checkRedirectToLogin(
+      "GET /programs/edgelink-x/analyses/[id]/options/[optionId]/decision",
+      decisionUnauth,
+    );
+    const applyUnauth = await fetch(
+      `${BASE_URL}/programs/edgelink-x/analyses/${SEEDED_ANALYSIS_RUN_ID}/options/${SEEDED_MITIGATION_OPTION_ID}/apply`,
+      { redirect: "manual" },
+    );
+    checkRedirectToLogin(
+      "GET /programs/edgelink-x/analyses/[id]/options/[optionId]/apply",
+      applyUnauth,
+    );
+
+    console.log("\nPhase 5 approval workflow — controlled test fixtures:");
+    const fixtures = new Phase5Fixtures(process.env.DATABASE_URL);
+    await fixtures.connect();
+    const pendingOptionId = `MIT-SMOKE-PENDING-${Date.now()}`;
+    const approvedOptionId = `MIT-SMOKE-APPROVED-${Date.now()}`;
+    const decisionId = `DEC-SMOKE-${Date.now()}`;
+    const proposedChangeId = `PC-SMOKE-${Date.now()}`;
+    try {
+      await fixtures.createPendingOption(pendingOptionId, 9001);
+      await fixtures.createApprovedOptionWithProposedChange(
+        approvedOptionId,
+        9002,
+        decisionId,
+        proposedChangeId,
+      );
+
+      const decisionUrl = (optionId) =>
+        `${BASE_URL}/programs/edgelink-x/analyses/${SEEDED_ANALYSIS_RUN_ID}/options/${optionId}/decision`;
+      const applyUrl = (optionId) =>
+        `${BASE_URL}/programs/edgelink-x/analyses/${SEEDED_ANALYSIS_RUN_ID}/options/${optionId}/apply`;
+
+      console.log("\nPhase 5 decision page — role-based controls:");
+      const decisionAsPm = await fetch(decisionUrl(pendingOptionId), {
+        headers: { Cookie: jar.header() },
+      });
+      const decisionAsPmHtml = await decisionAsPm.text();
+      check(
+        "Program Manager can view a pending option's decision page (200)",
+        decisionAsPm.status === 200,
+      );
+      check(
+        "Program Manager sees Approve and Reject controls",
+        decisionAsPmHtml.includes('value="APPROVED"') &&
+          decisionAsPmHtml.includes('value="REJECTED"'),
+      );
+
+      const decisionAsLead = await fetch(decisionUrl(pendingOptionId), {
+        headers: { Cookie: leadJar.header() },
+      });
+      const decisionAsLeadHtml = await decisionAsLead.text();
+      check("Engineering Lead can view the decision page (200)", decisionAsLead.status === 200);
+      check(
+        "Engineering Lead sees Request revision but not Approve or Reject",
+        decisionAsLeadHtml.includes('value="REVISION_REQUESTED"') &&
+          !decisionAsLeadHtml.includes('value="APPROVED"') &&
+          !decisionAsLeadHtml.includes('value="REJECTED"'),
+      );
+
+      const execJar = new CookieJar();
+      await signIn(execJar, EXECUTIVE_VIEWER_EMAIL, DEMO_PASSWORD);
+      check("Executive Viewer sign-in succeeds", execJar.hasSessionCookie());
+      const decisionAsExec = await fetch(decisionUrl(pendingOptionId), {
+        headers: { Cookie: execJar.header() },
+      });
+      const decisionAsExecHtml = await decisionAsExec.text();
+      check("Executive Viewer can view the decision page (200)", decisionAsExec.status === 200);
+      check(
+        "Executive Viewer sees no mutation controls (no verdict radio inputs)",
+        !decisionAsExecHtml.includes('name="verdict"'),
+      );
+
+      console.log("\nPhase 5 apply-preview page — controlled fixture:");
+      const applyAsPm = await fetch(applyUrl(approvedOptionId), {
+        headers: { Cookie: jar.header() },
+      });
+      const applyAsPmHtml = await applyAsPm.text();
+      check("Program Manager can view the apply-preview page (200)", applyAsPm.status === 200);
+      check(
+        "apply preview states nothing has been applied yet",
+        applyAsPmHtml.includes("Nothing has been applied yet"),
+      );
+      check(
+        "apply preview shows the proposed change's target and old/new values",
+        applyAsPmHtml.includes(SEEDED_MILESTONE_ID) &&
+          applyAsPmHtml.includes("2026-09-15") &&
+          applyAsPmHtml.includes("2026-12-01"),
+      );
+      check(
+        "apply preview shows an Apply control for the Program Manager",
+        applyAsPmHtml.includes("Apply changes"),
+      );
+
+      const applyAsLead = await fetch(applyUrl(approvedOptionId), {
+        headers: { Cookie: leadJar.header() },
+      });
+      const applyAsLeadHtml = await applyAsLead.text();
+      check("Engineering Lead can view the apply-preview page (200)", applyAsLead.status === 200);
+      check(
+        "Engineering Lead sees no Apply control (read-only)",
+        !applyAsLeadHtml.includes("Apply changes"),
+      );
+    } finally {
+      await fixtures.cleanup([pendingOptionId, approvedOptionId]);
+      await fixtures.end();
+    }
 
     console.log("\nSign-out:");
     const signOutCsrfRes = await fetch(`${BASE_URL}/api/auth/csrf`, {

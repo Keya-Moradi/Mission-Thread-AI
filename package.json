@@ -26,7 +26,8 @@
     "db:seed:dev:destructive": "node scripts/with-destructive-auth.mjs --scope=dev npm run db:seed:internal --workspace @missionthread/core",
     "db:reset:test": "node scripts/with-destructive-auth.mjs --scope=test npm run db:reset:test:internal --workspace @missionthread/core",
     "db:seed:github-actions:internal": "node scripts/with-destructive-auth.mjs --scope=github-actions npm run db:seed:internal --workspace @missionthread/core",
-    "smoke:test": "npm run build --workspace @missionthread/web && npm run smoke --workspace @missionthread/web"
+    "smoke:test": "npm run build --workspace @missionthread/web && npm run smoke --workspace @missionthread/web",
+    "test:e2e": "npm run build --workspace @missionthread/web && npm run test:e2e --workspace @missionthread/web"
   },
   "devDependencies": {
     "eslint": "^9",
