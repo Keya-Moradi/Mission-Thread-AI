@@ -10,6 +10,7 @@ import {
   type ServiceResult,
 } from "../analysis/types";
 import { buildProposedChangeSnapshot, type ProposedChangeSnapshot } from "./snapshot";
+import { validateNoOverlappingProposedChanges } from "./overlap";
 import {
   recordDecisionInputSchema,
   formatApprovalsZodError,
@@ -87,6 +88,21 @@ export async function recordMitigationDecision(
     return validationError(formatApprovalsZodError(parsed.error));
   }
   const input = parsed.data;
+
+  // Rejects a batch where two proposed changes would write the same field
+  // on the same record — without this, both pass the (per-change) stale
+  // check and are applied sequentially, making the final persisted value
+  // depend on array order rather than on what was actually approved. Pure
+  // and checked before any database access at all, so an overlapping batch
+  // never opens a transaction, loads a target record, or creates any row.
+  // See docs/DECISIONS.md, "Phase 5 correction: reject overlapping
+  // proposed-change writes".
+  if (input.verdict === "APPROVED") {
+    const overlapCheck = validateNoOverlappingProposedChanges(input.proposedChanges);
+    if (!overlapCheck.ok) {
+      return overlapCheck as ServiceResult<RecordedMitigationDecision>;
+    }
+  }
 
   const traceId = randomUUID();
   const decisionId = `DEC-${randomUUID()}`;

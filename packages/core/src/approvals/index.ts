@@ -39,6 +39,30 @@ export type { ProposedChangeSnapshot } from "./snapshot";
 export { checkProposedChangeStale } from "./stale";
 export type { StaleCheckResult } from "./stale";
 
+export {
+  getProposedChangeWriteKeys,
+  getPersistedProposedChangeWriteKeys,
+  findDuplicateWriteKey,
+  validateNoOverlappingProposedChanges,
+  validateNoOverlappingPersistedProposedChanges,
+} from "./overlap";
+
+export {
+  persistedMilestoneDateChangeSchema,
+  persistedRiskUpdateChangeSchema,
+  persistedBudgetUpdateChangeSchema,
+  persistedNewActionChangeSchema,
+  parsePersistedProposedChange,
+} from "./persisted-schemas";
+export type {
+  PersistedMilestoneDateChange,
+  PersistedRiskUpdateChange,
+  PersistedBudgetUpdateChange,
+  PersistedNewActionChange,
+  PersistedProposedChange,
+  PersistedProposedChangeParseResult,
+} from "./persisted-schemas";
+
 export { recordMitigationDecision } from "./record-decision";
 export type { RecordedMitigationDecision } from "./record-decision";
 

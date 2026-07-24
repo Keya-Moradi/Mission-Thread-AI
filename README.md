@@ -276,7 +276,7 @@ npm run typecheck     # tsc --noEmit across all workspaces
 npm run test           # Vitest unit tests (packages/core)
 npm run build           # production build of apps/web
 npm run smoke:test     # build + automated end-to-end smoke test
-npm run test:e2e       # build + Playwright happy-path test (resets missionthread_test first)
+npm run test:e2e       # build + Playwright happy-path test (non-destructive — see below)
 ```
 
 `smoke:test` builds the production app, then runs
@@ -295,14 +295,34 @@ number of checks isn't documented here since it isn't maintained from one
 authoritative source; read `apps/web/scripts/smoke-test.mjs` for the
 current, complete list.
 
-`test:e2e` resets and reseeds `missionthread_test` (via the same
-`db:reset:test` command above, run automatically by Playwright's global
-setup), then drives a real Chromium browser through the one true
-end-to-end path this repository has: sign in, approve a mitigation option
-with a proposed change, review the apply preview, type the exact `APPLY`
-confirmation, apply it, and verify the change actually took effect and is
-fully audited. Not wired into CI yet — see `apps/web/e2e/` and
-`docs/DECISIONS.md`.
+`test:e2e` is **non-destructive**: it only builds the app and drives a real
+Chromium browser through it, connecting to whatever is already in
+`missionthread_test`. It performs no database reset of its own. The one
+test it runs signs in, approves a mitigation option with a proposed
+change, reviews the apply preview, types the exact `APPLY` confirmation,
+applies it, and verifies the change actually took effect and is fully
+audited — then restores the exact records it changed (the milestone's
+date, and its own decision/proposed-change/audit rows) in a `try`/`finally`,
+so it's safe to run repeatedly without another reset in between. Not wired
+into CI yet — see `apps/web/e2e/` and `docs/DECISIONS.md`.
+
+Before running `test:e2e` for the first time (or whenever you want a known
+starting fixture — one successful analysis, three `PENDING` mitigation
+options, no decisions), reset the test database first, as its own
+separate, explicitly authorized step:
+
+```bash
+npm run db:reset:test
+npm run test:e2e
+```
+
+A combined convenience command exists for when you genuinely want both in
+one step — its name states plainly that it's destructive, unlike a bare
+`test:e2e` ever would:
+
+```bash
+npm run test:e2e:reset:test:destructive   # db:reset:test, then test:e2e — requires the same fresh authorization as db:reset:test alone
+```
 
 All of the above except `test:e2e` are run in CI (`.github/workflows/ci.yml`)
 with `AI_MODE=mock`, so the pipeline never needs a live model API key.
@@ -409,6 +429,17 @@ record (`DECISION_RECORDED`, `CHANGES_APPLIED`), visible on `/audit`.
   otherwise have no way to distinguish from an unattended default — and is
   atomic and all-or-nothing: a single stale or invalid proposed change
   blocks the entire batch, never a partial apply.
+- A single approval may never propose two changes that write the same
+  field on the same record (e.g. two new dates for the same milestone) —
+  rejected before any database access, since applying both would silently
+  make the result depend on list order rather than on what was actually
+  approved. The apply step separately revalidates every stored proposed
+  change against a strict schema immediately before applying it, so a
+  malformed or inconsistent stored row (never producible through the
+  normal decision flow) still fails closed rather than being trusted by a
+  type-level assumption. See `docs/DECISIONS.md`, "Phase 5 correction:
+  reject overlapping proposed-change writes" and "apply-time
+  persisted-snapshot revalidation."
 
 ## Mock vs. live AI
 

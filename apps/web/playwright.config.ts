@@ -28,11 +28,16 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   reporter: "list",
-  // Resets and reseeds missionthread_test before the suite runs — see
-  // e2e/global-setup.ts — so every run starts from the same deterministic
-  // fixture (one successful analysis, three PENDING mitigation options, no
-  // decisions) regardless of what a prior run left behind.
-  globalSetup: "./e2e/global-setup.ts",
+  // Deliberately no globalSetup here: this suite must never perform a
+  // hidden schema/database reset on an ordinary `npm run test:e2e`. The
+  // deterministic starting fixture it needs (one successful analysis,
+  // three PENDING mitigation options, no decisions) comes from a
+  // separately, explicitly authorized `npm run db:reset:test` run before
+  // this suite — see README.md and docs/DECISIONS.md, "Phase 5
+  // correction: non-destructive Playwright command". The one test this
+  // suite currently runs (e2e/decision-workflow.spec.ts) restores every
+  // record it changes in a try/finally, so it stays repeatable without a
+  // reset between runs.
   use: {
     baseURL: `http://localhost:${PORT}`,
   },

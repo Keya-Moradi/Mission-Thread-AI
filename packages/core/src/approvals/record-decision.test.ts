@@ -346,6 +346,158 @@ describe("recordMitigationDecision — proposed changes", () => {
   });
 });
 
+describe("recordMitigationDecision — overlapping proposed-change rejection", () => {
+  it("two milestone-date changes for the same milestone are rejected", async () => {
+    const optionId = await createTempMitigationOption();
+    const result = await recordMitigationDecision(
+      approve(optionId, [
+        {
+          changeType: "MILESTONE_DATE",
+          targetRecordId: MILESTONE_IDS[0],
+          currentDate: "2027-01-01",
+        },
+        {
+          changeType: "MILESTONE_DATE",
+          targetRecordId: MILESTONE_IDS[0],
+          currentDate: "2027-02-01",
+        },
+      ]),
+      DEMO_USER_IDS.programManager,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("two risk updates writing the same field are rejected", async () => {
+    const optionId = await createTempMitigationOption();
+    const result = await recordMitigationDecision(
+      approve(optionId, [
+        { changeType: "RISK_UPDATE", targetRecordId: "RISK-001", status: "MITIGATING" },
+        { changeType: "RISK_UPDATE", targetRecordId: "RISK-001", status: "CLOSED" },
+      ]),
+      DEMO_USER_IDS.programManager,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("two budget updates writing the same field are rejected", async () => {
+    const optionId = await createTempMitigationOption();
+    const result = await recordMitigationDecision(
+      approve(optionId, [
+        { changeType: "BUDGET_UPDATE", targetRecordId: "BUDGET-001", plannedAmount: "1000.00" },
+        { changeType: "BUDGET_UPDATE", targetRecordId: "BUDGET-001", plannedAmount: "2000.00" },
+      ]),
+      DEMO_USER_IDS.programManager,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("duplicate identical proposals are rejected", async () => {
+    const optionId = await createTempMitigationOption();
+    const change = {
+      changeType: "MILESTONE_DATE" as const,
+      targetRecordId: MILESTONE_IDS[0],
+      currentDate: "2027-01-01",
+    };
+    const result = await recordMitigationDecision(
+      approve(optionId, [change, { ...change }]),
+      DEMO_USER_IDS.programManager,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("disjoint fields on one risk are allowed", async () => {
+    const optionId = await createTempMitigationOption();
+    const result = await recordMitigationDecision(
+      approve(optionId, [
+        { changeType: "RISK_UPDATE", targetRecordId: "RISK-001", status: "MITIGATING" },
+        { changeType: "RISK_UPDATE", targetRecordId: "RISK-001", severity: "LOW" },
+      ]),
+      DEMO_USER_IDS.programManager,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("disjoint fields on one budget item are allowed", async () => {
+    const optionId = await createTempMitigationOption();
+    const result = await recordMitigationDecision(
+      approve(optionId, [
+        { changeType: "BUDGET_UPDATE", targetRecordId: "BUDGET-001", plannedAmount: "1000.00" },
+        { changeType: "BUDGET_UPDATE", targetRecordId: "BUDGET-001", actualAmount: "500.00" },
+      ]),
+      DEMO_USER_IDS.programManager,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("updates to different targets are allowed", async () => {
+    const optionId = await createTempMitigationOption();
+    const result = await recordMitigationDecision(
+      approve(optionId, [
+        { changeType: "RISK_UPDATE", targetRecordId: "RISK-001", status: "MITIGATING" },
+        { changeType: "RISK_UPDATE", targetRecordId: "RISK-002", status: "MITIGATING" },
+      ]),
+      DEMO_USER_IDS.programManager,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("multiple NEW_ACTION entries are allowed", async () => {
+    const optionId = await createTempMitigationOption();
+    const newAction = (title: string) => ({
+      changeType: "NEW_ACTION" as const,
+      targetRecordId: null,
+      targetRecordType: null,
+      title,
+      description: "A durable follow-up action created by this test; safe to delete.",
+      dueDate: null,
+    });
+    const result = await recordMitigationDecision(
+      approve(optionId, [newAction("First action"), newAction("Second action")]),
+      DEMO_USER_IDS.programManager,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("overlap rejection creates no Decision, does not change option status, creates no ProposedChange, and creates no audit event", async () => {
+    const optionId = await createTempMitigationOption();
+    const result = await recordMitigationDecision(
+      approve(optionId, [
+        {
+          changeType: "MILESTONE_DATE",
+          targetRecordId: MILESTONE_IDS[0],
+          currentDate: "2027-01-01",
+        },
+        {
+          changeType: "MILESTONE_DATE",
+          targetRecordId: MILESTONE_IDS[0],
+          currentDate: "2027-02-01",
+        },
+      ]),
+      DEMO_USER_IDS.programManager,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("VALIDATION_ERROR");
+
+    const decisions = await prisma.decision.findMany({ where: { mitigationOptionId: optionId } });
+    expect(decisions).toHaveLength(0);
+
+    const option = await prisma.mitigationOption.findUnique({ where: { id: optionId } });
+    expect(option?.status).toBe("PENDING");
+
+    const proposedChanges = await prisma.proposedChange.findMany({
+      where: { mitigationOptionId: optionId },
+    });
+    expect(proposedChanges).toHaveLength(0);
+
+    const auditEvents = await prisma.auditEvent.findMany({ where: { targetRecordId: optionId } });
+    expect(auditEvents).toHaveLength(0);
+  });
+});
+
 describe("recordMitigationDecision — transaction and audit", () => {
   it("creates exactly one Decision, updates option status, and one DECISION_RECORDED audit event, atomically", async () => {
     const optionId = await createTempMitigationOption();

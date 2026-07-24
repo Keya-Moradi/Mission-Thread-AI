@@ -340,6 +340,207 @@ describe("applyApprovedChanges — stale-data conflict detection", () => {
   });
 });
 
+describe("applyApprovedChanges — defensive persisted-row revalidation", () => {
+  // Every test in this block directly corrupts an already-approved,
+  // already-persisted ProposedChange row (never possible through the
+  // public recordMitigationDecision()/schemas.ts input contract — this
+  // simulates a stored row that's malformed or inconsistent for some
+  // other reason: a future migration gap, a direct database edit, a bug
+  // in an earlier version of this code) and proves applyApprovedChanges()
+  // fails closed before any domain mutation, rather than trusting a
+  // TypeScript type or a non-null assertion. See docs/DECISIONS.md, "Phase
+  // 5 correction: apply-time persisted-snapshot revalidation".
+
+  it("wrong targetRecordType is rejected before mutation", async () => {
+    const milestone = await createTempMilestone();
+    const { optionId } = await createApprovedOption([
+      {
+        changeType: "MILESTONE_DATE" as const,
+        targetRecordId: milestone.id,
+        currentDate: "2027-02-01",
+      },
+    ]);
+    const change = await prisma.proposedChange.findFirstOrThrow({
+      where: { mitigationOptionId: optionId },
+    });
+    await prisma.proposedChange.update({
+      where: { id: change.id },
+      data: { targetRecordType: "RISK" },
+    });
+
+    const result = await applyApprovedChanges(optionId, DEMO_USER_IDS.programManager, "APPLY");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("VALIDATION_ERROR");
+
+    const updated = await prisma.milestone.findUniqueOrThrow({ where: { id: milestone.id } });
+    expect(updated.currentDate.toISOString().slice(0, 10)).toBe(
+      milestone.currentDate.toISOString().slice(0, 10),
+    );
+  });
+
+  it("malformed oldValue is rejected", async () => {
+    const milestone = await createTempMilestone();
+    const { optionId } = await createApprovedOption([
+      {
+        changeType: "MILESTONE_DATE" as const,
+        targetRecordId: milestone.id,
+        currentDate: "2027-02-01",
+      },
+    ]);
+    const change = await prisma.proposedChange.findFirstOrThrow({
+      where: { mitigationOptionId: optionId },
+    });
+    await prisma.proposedChange.update({
+      where: { id: change.id },
+      data: { oldValue: { currentDate: "not-a-date" } },
+    });
+
+    const result = await applyApprovedChanges(optionId, DEMO_USER_IDS.programManager, "APPLY");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("VALIDATION_ERROR");
+
+    const updated = await prisma.milestone.findUniqueOrThrow({ where: { id: milestone.id } });
+    expect(updated.currentDate.toISOString().slice(0, 10)).toBe(
+      milestone.currentDate.toISOString().slice(0, 10),
+    );
+  });
+
+  it("malformed newValue is rejected", async () => {
+    const milestone = await createTempMilestone();
+    const { optionId } = await createApprovedOption([
+      {
+        changeType: "MILESTONE_DATE" as const,
+        targetRecordId: milestone.id,
+        currentDate: "2027-02-01",
+      },
+    ]);
+    const change = await prisma.proposedChange.findFirstOrThrow({
+      where: { mitigationOptionId: optionId },
+    });
+    await prisma.proposedChange.update({
+      where: { id: change.id },
+      data: { newValue: { currentDate: "2027-13-40" } },
+    });
+
+    const result = await applyApprovedChanges(optionId, DEMO_USER_IDS.programManager, "APPLY");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("VALIDATION_ERROR");
+
+    const updated = await prisma.milestone.findUniqueOrThrow({ where: { id: milestone.id } });
+    expect(updated.currentDate.toISOString().slice(0, 10)).toBe(
+      milestone.currentDate.toISOString().slice(0, 10),
+    );
+  });
+
+  it("an oldValue/newValue key-set mismatch is rejected", async () => {
+    const risk = await createTempRisk();
+    const { optionId } = await createApprovedOption([
+      {
+        changeType: "RISK_UPDATE" as const,
+        targetRecordId: risk.id,
+        status: "MITIGATING" as const,
+      },
+    ]);
+    const change = await prisma.proposedChange.findFirstOrThrow({
+      where: { mitigationOptionId: optionId },
+    });
+    // oldValue now carries an extra "severity" key newValue doesn't have.
+    await prisma.proposedChange.update({
+      where: { id: change.id },
+      data: { oldValue: { status: risk.status, severity: risk.severity } },
+    });
+
+    const result = await applyApprovedChanges(optionId, DEMO_USER_IDS.programManager, "APPLY");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("VALIDATION_ERROR");
+
+    const updated = await prisma.risk.findUniqueOrThrow({ where: { id: risk.id } });
+    expect(updated.status).toBe(risk.status);
+    expect(updated.severity).toBe(risk.severity);
+  });
+
+  it("directly inserted overlapping stored proposals are rejected", async () => {
+    const risk = await createTempRisk();
+    const { optionId } = await createApprovedOption([
+      {
+        changeType: "RISK_UPDATE" as const,
+        targetRecordId: risk.id,
+        status: "MITIGATING" as const,
+      },
+      { changeType: "RISK_UPDATE" as const, targetRecordId: risk.id, severity: "LOW" as const },
+    ]);
+
+    // Both rows are individually valid, and this pair was non-overlapping
+    // (disjoint fields) when recordMitigationDecision() created them —
+    // directly rewrite the second row so it now writes "status" too,
+    // producing a stored-batch overlap only apply-time revalidation can
+    // catch (recordMitigationDecision()'s own overlap check already ran
+    // and passed, before this row was corrupted).
+    const changes = await prisma.proposedChange.findMany({
+      where: { mitigationOptionId: optionId },
+      orderBy: { id: "asc" },
+    });
+    expect(changes).toHaveLength(2);
+    await prisma.proposedChange.update({
+      where: { id: changes[1]!.id },
+      data: { oldValue: { status: risk.status }, newValue: { status: "CLOSED" } },
+    });
+
+    const result = await applyApprovedChanges(optionId, DEMO_USER_IDS.programManager, "APPLY");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("VALIDATION_ERROR");
+
+    const updated = await prisma.risk.findUniqueOrThrow({ where: { id: risk.id } });
+    expect(updated.status).toBe(risk.status);
+    expect(updated.severity).toBe(risk.severity);
+  });
+
+  it("one malformed proposed change blocks the entire batch — no partial apply", async () => {
+    const milestone = await createTempMilestone();
+    const risk = await createTempRisk();
+    const { optionId } = await createApprovedOption([
+      {
+        changeType: "MILESTONE_DATE" as const,
+        targetRecordId: milestone.id,
+        currentDate: "2027-02-01",
+      },
+      {
+        changeType: "RISK_UPDATE" as const,
+        targetRecordId: risk.id,
+        status: "MITIGATING" as const,
+      },
+    ]);
+    const riskChange = await prisma.proposedChange.findFirstOrThrow({
+      where: { mitigationOptionId: optionId, changeType: "RISK_UPDATE" },
+    });
+    await prisma.proposedChange.update({
+      where: { id: riskChange.id },
+      data: { targetRecordType: "BUDGET_ITEM" },
+    });
+
+    const result = await applyApprovedChanges(optionId, DEMO_USER_IDS.programManager, "APPLY");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("VALIDATION_ERROR");
+
+    // Neither the well-formed milestone change nor the malformed risk
+    // change actually mutated anything — the whole batch was refused
+    // before the domain-mutation loop ever ran.
+    const updatedMilestone = await prisma.milestone.findUniqueOrThrow({
+      where: { id: milestone.id },
+    });
+    expect(updatedMilestone.currentDate.toISOString().slice(0, 10)).toBe(
+      milestone.currentDate.toISOString().slice(0, 10),
+    );
+    const updatedRisk = await prisma.risk.findUniqueOrThrow({ where: { id: risk.id } });
+    expect(updatedRisk.status).toBe(risk.status);
+
+    const proposedChanges = await prisma.proposedChange.findMany({
+      where: { mitigationOptionId: optionId },
+    });
+    expect(proposedChanges.every((change) => change.status === "PENDING")).toBe(true);
+  });
+});
+
 describe("applyApprovedChanges — apply transaction", () => {
   it("applies an approved milestone-date change to the real Milestone row", async () => {
     const milestone = await createTempMilestone();

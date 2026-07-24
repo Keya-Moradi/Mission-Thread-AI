@@ -425,6 +425,36 @@ and its durable payload is the `ProposedChange` row's own `newValue` — no
 separate `ActionItem` model, surfaced in the program overview's "Actions"
 section.
 
+**Overlap rejection.** A batch of proposed changes may never contain two
+entries that write the same field on the same record (e.g. two
+`MILESTONE_DATE` entries for the same milestone, or two `RISK_UPDATE`
+entries both proposing a new `status`) — without this, both would pass
+their own (per-change) stale check and apply in array order, making the
+final persisted value depend on list order rather than on what a human
+actually approved. `getProposedChangeWriteKeys()`
+(`packages/core/src/approvals/overlap.ts`) derives one
+`<targetType>:<targetId>:<field>` key per field a change actually supplies
+(`NEW_ACTION` always returns none — it creates a new record every time, so
+it can never overlap with anything); `validateNoOverlappingProposedChanges()`
+rejects the first duplicate, called immediately after Zod parsing and
+before any database access at all. Disjoint fields on the same record,
+updates to different records, and multiple `NEW_ACTION` entries remain
+valid in one batch.
+
+**Apply-time persisted-snapshot revalidation.** Decision-time validation is
+the normal boundary for what gets written; the apply step revalidates it
+anyway rather than trusting a TypeScript type. `persisted-schemas.ts`
+defines strict, `changeType`-keyed schemas for exactly what a stored
+`ProposedChange` row must contain (correct `targetRecordType`, matching
+non-empty `oldValue`/`newValue` key sets restricted to allowlisted fields,
+valid value ranges/formats). `applyApprovedChanges()` parses every
+`PENDING` row this way — and re-checks the parsed rows for a stored
+cross-row overlap — before any stale check or domain mutation; a
+malformed or overlapping stored row is rejected with zero mutations. The
+resulting validated shape is what the domain-mutation code actually
+operates on, replacing every non-null assertion/blind cast that previously
+stood in for a runtime guarantee.
+
 **Decision transaction.** `recordMitigationDecision()` — actor/permission
 check, option/program lookup, PENDING/no-existing-decision checks,
 proposed-change validation and snapshotting, `Decision` creation, status
