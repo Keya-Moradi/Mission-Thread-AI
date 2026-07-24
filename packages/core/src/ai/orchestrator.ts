@@ -3,7 +3,14 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { entityIdSchema } from "../analysis/schemas";
 import { buildAnalysisEvidence } from "../analysis/evidence";
-import { ok, notFound, validationError, forbidden, type ServiceResult } from "../analysis/types";
+import {
+  ok,
+  notFound,
+  validationError,
+  forbidden,
+  rateLimited,
+  type ServiceResult,
+} from "../analysis/types";
 import { createProviderFromEnv } from "./provider-factory";
 import {
   buildModelInputProjection,
@@ -12,12 +19,8 @@ import {
   type ModelInputProjection,
 } from "./model-input";
 import { IMPACT_ANALYSIS_SYSTEM_PROMPT } from "./prompts/impact-analysis-system";
-import {
-  impactAnalysisOutputSchema,
-  summarizeOutputSchemaErrors,
-  type ImpactAnalysisOutput,
-} from "./output-schema";
-import { validateImpactAnalysisSemantics } from "./output-validation";
+import type { ImpactAnalysisOutput } from "./output-schema";
+import { validateProviderOutput } from "./validate-provider-output";
 import { classifyProviderError, isRetryableCategory, type AiErrorCategory } from "./errors";
 import { logAnalysisEvent } from "./logging";
 import {
@@ -25,6 +28,7 @@ import {
   buildSucceededImpactAnalysisData,
 } from "./attempt-persistence";
 import type { LLMProvider, LLMProviderRequest } from "./provider";
+import { AnalysisRateLimiter, defaultAnalysisRateLimiter } from "../security/analysis-rate-limiter";
 
 const MAX_ATTEMPTS = 2;
 
@@ -320,32 +324,23 @@ async function runProviderAndValidate(
     };
   }
 
-  // STAGE: structural validation — outside the provider try/catch; safeParse
-  // never throws.
-  const structural = impactAnalysisOutputSchema.safeParse(rawOutput);
-  if (!structural.success) {
+  // STAGE: structural + semantic validation — outside the provider
+  // try/catch; validateProviderOutput() never throws. This is the single
+  // authoritative "is this output safe to persist" check, reused
+  // unchanged by the mock evaluation suite (evals/) and by tests — see
+  // docs/DECISIONS.md, "Phase 6: centralized provider-output validation".
+  const validation = validateProviderOutput(rawOutput, modelInput);
+  if (!validation.valid) {
     return {
       kind: "validation-failure",
-      category: "INVALID_OUTPUT_SCHEMA",
-      errors: summarizeOutputSchemaErrors(structural.error),
+      category: validation.category,
+      errors: validation.errors,
       durationMs,
       providerModel,
     };
   }
 
-  // STAGE: semantic validation — also outside the provider try/catch.
-  const semantic = validateImpactAnalysisSemantics(structural.data, modelInput);
-  if (!semantic.valid) {
-    return {
-      kind: "validation-failure",
-      category: "SEMANTIC_VALIDATION_FAILED",
-      errors: semantic.errors,
-      durationMs,
-      providerModel,
-    };
-  }
-
-  return { kind: "success", output: structural.data, durationMs, providerModel };
+  return { kind: "success", output: validation.output, durationMs, providerModel };
 }
 
 // ---------------------------------------------------------------------------
@@ -477,7 +472,13 @@ async function recordPersistenceFailureAfterValidOutput(params: {
 export async function runImpactAnalysis(
   eventId: string,
   actorUserId: string,
-  options?: { provider?: LLMProvider; persistence?: Partial<AnalysisPersistence> },
+  options?: {
+    provider?: LLMProvider;
+    persistence?: Partial<AnalysisPersistence>;
+    /** Test/eval-only override point — apps/web never supplies it, and the
+     * production path always uses defaultAnalysisRateLimiter. */
+    rateLimiter?: AnalysisRateLimiter;
+  },
 ): Promise<ServiceResult<RunImpactAnalysisResult>> {
   if (!actorUserId || typeof actorUserId !== "string") {
     return forbidden("Invalid session.");
@@ -508,6 +509,35 @@ export async function runImpactAnalysis(
   });
   if (!event) {
     return notFound("PROGRAM_EVENT", parsedEventId.data);
+  }
+
+  // Rate limit — deliberately placed here: after actor-ID validation, fresh
+  // database-role authorization, event-ID validation, and event-existence
+  // validation, but before any deterministic evidence/model-input
+  // construction, attempt persistence, or provider invocation. This means:
+  // an unauthorized caller never consumes another user's allowance (the
+  // check runs against the *authorized* actor's own key, after the
+  // authorization checks above already returned FORBIDDEN for anyone
+  // else); a malformed or nonexistent event never consumes quota (both
+  // return before this line); and a provider retry inside one authorized
+  // run never consumes a second slot (the limiter is checked once per
+  // top-level call, not once per attempt inside the loop below). See
+  // docs/THREAT_MODEL.md ("Denial-of-wallet") and docs/DECISIONS.md,
+  // "Phase 6: analysis rate limiter".
+  const rateLimiter = options?.rateLimiter ?? defaultAnalysisRateLimiter;
+  const rateLimitResult = rateLimiter.checkAndConsume(actor.id);
+  if (!rateLimitResult.allowed) {
+    logAnalysisEvent("analysis.rate_limited", {
+      traceId: randomUUID(),
+      eventId: event.id,
+      requestedById: actor.id,
+      aiMode: process.env.AI_MODE ?? "unknown",
+      retryAfterSeconds: rateLimitResult.retryAfterSeconds,
+    });
+    return rateLimited(
+      rateLimitResult.retryAfterSeconds,
+      `Too many analysis requests. Please wait ${rateLimitResult.retryAfterSeconds} second(s) and try again.`,
+    );
   }
 
   const evidenceResult = await buildAnalysisEvidence(event.id);

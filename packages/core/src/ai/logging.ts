@@ -3,6 +3,12 @@ export const ANALYSIS_LOG_EVENTS = [
   "analysis.succeeded",
   "analysis.failed",
   "analysis.retrying",
+  // Emitted when the in-memory analysis rate limiter denies a request
+  // (packages/core/src/security/analysis-rate-limiter.ts) — denied before
+  // any ImpactAnalysis attempt is created, so analysisRunId/analysisId/
+  // attempt are never available for this event; see AnalysisLogFields
+  // below, where those three are optional for exactly this reason.
+  "analysis.rate_limited",
 ] as const;
 export type AnalysisLogEvent = (typeof ANALYSIS_LOG_EVENTS)[number];
 
@@ -14,9 +20,12 @@ export type AnalysisLogEvent = (typeof ANALYSIS_LOG_EVENTS)[number];
  */
 export interface AnalysisLogFields {
   traceId: string;
-  analysisRunId: string;
-  analysisId: string;
-  attempt: number;
+  // Optional: a rate-limited request is denied before any attempt exists,
+  // so it has no analysisRunId/analysisId/attempt to report. Every other
+  // event kind always supplies all three.
+  analysisRunId?: string;
+  analysisId?: string;
+  attempt?: number;
   eventId: string;
   requestedById: string;
   aiMode: string;
@@ -26,6 +35,8 @@ export interface AnalysisLogFields {
   status?: string;
   validationPassed?: boolean;
   errorCategory?: string;
+  /** analysis.rate_limited only. */
+  retryAfterSeconds?: number;
 }
 
 export type AnalysisLogSink = (line: string) => void;

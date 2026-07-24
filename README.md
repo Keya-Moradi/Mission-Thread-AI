@@ -15,22 +15,27 @@ program, customer, classified system, or export-controlled detail.
 
 ## Project status
 
-**Phase 5 of 8 (Approval and audit) — complete.** Workspaces, database
+**Phase 6 of 8 (Security and evaluations) — complete.** Workspaces, database
 schema, deterministic seed data, authentication, the full deterministic
 program-analysis service layer (`packages/core/src/analysis`), a real
 database-driven dashboard/program overview/event-entry form/audit shell,
-a full AI impact-analysis pipeline (`packages/core/src/ai`), and now the
-complete human approval/apply workflow (`packages/core/src/approvals`) all
-exist and are verified working. A Program Manager can record a
-supplier-delay or general-update event, trigger an impact analysis on it,
-and — once it succeeds — record a decision (approve with structured
-proposed changes, reject, or request revision) on each of the three
-mitigation options; an Engineering Lead may request revision. An approval
-is reviewed on a read-only apply-preview page (old vs. proposed values,
-stale-data warnings) before a Program Manager types an exact confirmation
-and applies it, transactionally and atomically, to the real milestone,
-risk, or budget data — every step producing an append-only audit record.
-See [Phase roadmap](#phase-roadmap) and [Limitations](#limitations) below.
+a full AI impact-analysis pipeline (`packages/core/src/ai`), the complete
+human approval/apply workflow (`packages/core/src/approvals`), and now a
+full threat model, strengthened/testable prompt-injection boundaries, an
+in-memory analysis rate limiter (`packages/core/src/security`), a
+deterministic mock evaluation suite (`evals/`), and a guarded (not yet
+executed) live-evaluation command all exist and are verified working. A
+Program Manager can record a supplier-delay or general-update event,
+trigger an impact analysis on it (rate-limited to 3 requests per 60
+seconds per actor), and — once it succeeds — record a decision (approve
+with structured proposed changes, reject, or request revision) on each of
+the three mitigation options; an Engineering Lead may request revision. An
+approval is reviewed on a read-only apply-preview page (old vs. proposed
+values, stale-data warnings) before a Program Manager types an exact
+confirmation and applies it, transactionally and atomically, to the real
+milestone, risk, or budget data — every step producing an append-only audit
+record. See [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md),
+[Phase roadmap](#phase-roadmap), and [Limitations](#limitations) below.
 
 Development follows a phase-gated process defined in
 [`PROJECT_GUIDE.md`](PROJECT_GUIDE.md) and [`docs/SPEC.md`](docs/SPEC.md):
@@ -73,10 +78,11 @@ packages/core          Zod schemas, deterministic services (Phase 2, done),
                         AI provider abstraction + mock/live providers + orchestration
                         (packages/core/src/ai — Phase 4, done),
                         approval/apply workflow (packages/core/src/approvals — Phase 5, done),
+                        analysis rate limiter (packages/core/src/security — Phase 6, done),
                         Prisma schema/client
 packages/mcp-server     Read-only MCP server (placeholder — built in Phase 7)
 docs/                   Spec, plans, tasks, decisions, architecture, threat model
-evals/                  AI pipeline evaluations (Phase 6)
+evals/                  AI pipeline evaluations (Phase 6, done)
 ```
 
 Prisma's schema is centralized in `packages/core/prisma` — both `apps/web`
@@ -269,14 +275,16 @@ Postgres instance from outside Docker's internal network.
 ## Quality gate commands
 
 ```bash
-npm run lint          # ESLint across all workspaces
+npm run lint          # ESLint across all workspaces + evals/
 npm run format:check  # Prettier check
 npm run format         # Prettier write
-npm run typecheck     # tsc --noEmit across all workspaces
-npm run test           # Vitest unit tests (packages/core)
+npm run typecheck     # tsc --noEmit across all workspaces + evals/
+npm run test           # Vitest unit tests (packages/core, apps/web)
 npm run build           # production build of apps/web
 npm run smoke:test     # build + automated end-to-end smoke test
 npm run test:e2e       # build + Playwright happy-path test (non-destructive — see below)
+npm run eval:mock       # deterministic, offline AI-pipeline evaluation suite (see evals/README.md)
+npm run eval:live       # guarded live-provider evaluation — requires explicit opt-in, see below
 ```
 
 `smoke:test` builds the production app, then runs
@@ -339,8 +347,19 @@ imports a database client until it has independently re-verified that
 target, immediately before doing so. See `docs/DECISIONS.md`, "Playwright
 database-isolation repair."
 
-All of the above except `test:e2e` are run in CI (`.github/workflows/ci.yml`)
-with `AI_MODE=mock`, so the pipeline never needs a live model API key.
+`eval:mock` runs a deterministic, offline suite of 8 scenarios against the
+production mock AI pipeline (`evals/`) — no network call, no database,
+exits nonzero on any failure; safe to run locally at any time, though it is
+not yet a CI step (Phase 8 owns further CI expansion). `eval:live` requires
+explicit opt-in (`AI_MODE=live`, `RUN_LIVE_EVALS=true`, a real
+`OPENAI_API_KEY`) and spends real provider credit; it has never been run in
+this repository — Phase 8 owns the one authorized, sanitized
+live-evaluation run and `docs/EVAL_RESULTS.md`. See
+[`evals/README.md`](evals/README.md).
+
+All of the above except `test:e2e`, `eval:mock`, and `eval:live` are run in
+CI (`.github/workflows/ci.yml`) with `AI_MODE=mock`, so the pipeline never
+needs a live model API key.
 
 ## Current routes and functionality (Phase 5)
 
@@ -455,6 +474,17 @@ record (`DECISION_RECORDED`, `CHANGES_APPLIED`), visible on `/audit`.
   type-level assumption. See `docs/DECISIONS.md`, "Phase 5 correction:
   reject overlapping proposed-change writes" and "apply-time
   persisted-snapshot revalidation."
+- Running an impact analysis is rate-limited to 3 accepted requests per
+  authenticated actor per 60 seconds (`packages/core/src/security/analysis-rate-limiter.ts`),
+  checked once per request — after authorization, before any evidence
+  construction or provider call — so a denied request never calls the
+  provider and never creates a row. In-memory and process-local by design;
+  see `docs/THREAT_MODEL.md` and [Limitations](#limitations).
+- Supplier/user free text (`reason`/`rawNotes`) is isolated in a dedicated
+  `untrustedData` field throughout the AI pipeline and never treated as an
+  instruction, never merged into a trusted fact, and never interpolated
+  into the fixed system prompt — see `docs/THREAT_MODEL.md`, "Prompt
+  injection."
 
 ## Mock vs. live AI
 
@@ -504,18 +534,20 @@ and `docs/ARCHITECTURE.md`.
 
 ## Limitations
 
-- **Phase 1–5 build.** The deterministic program-logic services
+- **Phase 1–6 build.** The deterministic program-logic services
   (traceability, dependency chains, verification gaps, related defects,
   schedule/budget exposure, risk scoring, readiness scoring, bounded
   evidence assembly) exist in `packages/core/src/analysis`, a real
   dashboard/program overview/event-entry form/audit shell call them
   against live Postgres data, a full AI impact-analysis pipeline
   (`packages/core/src/ai`) produces persisted, validated mitigation
-  options, and the complete human approval/apply workflow
-  (`packages/core/src/approvals`) now takes an approved option through a
-  transactional, audited domain mutation. Security hardening beyond what
-  each phase has already built (a full threat model, prompt-injection
-  defenses, rate limiting) is Phase 6+.
+  options, the complete human approval/apply workflow
+  (`packages/core/src/approvals`) takes an approved option through a
+  transactional, audited domain mutation, and a full threat model,
+  strengthened prompt-injection tests, an in-memory analysis rate limiter,
+  and a mock evaluation suite (`docs/THREAT_MODEL.md`,
+  `packages/core/src/security`, `evals/`) now exist. React Flow, MCP, and
+  a live-eval run are Phase 7+.
 - **`NEW_ACTION` proposed changes have no dedicated domain table.** For
   this MVP, an applied `NEW_ACTION`'s own `ProposedChange` row (its
   `newValue` JSON) is the durable record, surfaced only in the program
@@ -541,21 +573,37 @@ and `docs/ARCHITECTURE.md`.
 - **`next-auth` is on the v5 beta channel** (`5.0.0-beta.31`) — it's the
   version Auth.js's own docs currently recommend for the App Router, but
   it is pre-1.0 and could introduce breaking changes on upgrade.
-- **In-memory rate limiting (Phase 6+) will be single-process only** — not
-  suitable for a horizontally scaled deployment, and will be documented as
-  such when built.
+- **The in-memory analysis rate limiter is process-local** — a process
+  restart clears every counter, and a horizontally scaled deployment (more
+  than one application instance) would have each instance enforce an
+  independent limit rather than a shared one. Not suitable for that
+  deployment shape without adding a shared store (Redis, or a
+  database-backed limiter); accepted for this MVP per `docs/SPEC.md` §12.
+  See `docs/THREAT_MODEL.md`, "Denial-of-wallet."
 - **Audit append-only-ness is enforced at the application layer only** — no
   update/delete route exists anywhere for `AuditEvent`, but this is not
-  cryptographic immutability; see `docs/THREAT_MODEL.md` (Phase 6).
+  cryptographic immutability, and a direct database administrator remains
+  outside this guarantee; see `docs/THREAT_MODEL.md`.
 - **The Playwright end-to-end suite is not wired into CI yet** — it's a
   local/manual check (`npm run test:e2e`) for now; Phase 8 owns full CI
   browser-test expansion.
-- Three known **moderate npm audit advisories** exist in transitive
-  dev-tooling dependencies (an optional nested `@prisma/dev` → old
-  `@hono/node-server`, and Next's internally bundled `postcss` copy). Both
-  suggested "fixes" would downgrade Prisma or Next to old/breaking
-  versions, which is a worse trade than the advisories themselves; tracked
-  for revisiting as upstream releases land.
+- **Mock evals demonstrate pipeline and policy behavior, not general
+  live-model quality** — `npm run eval:mock` proves the pipeline's
+  deterministic/structural/semantic rules hold, not that a real model
+  produces good narrative output; that's `eval:live`'s job, which has not
+  been run in this repository yet. See `evals/README.md`.
+- **Remaining npm audit findings** — `@prisma/dev`'s own transitive
+  `find-my-way`/`valibot` chain (optional `prisma dev` local-tooling
+  dependency, never invoked anywhere in this repository) and Next.js's
+  internally bundled `postcss`/`sharp` copies (unreachable through any
+  code path this app exercises — no attacker-controlled CSS is ever
+  processed, and `next/image` is never imported). The only available
+  "fixes" for these require either an upstream patch not yet released or a
+  multi-major-version downgrade of Next.js, which would be a worse trade
+  than the advisories themselves. See `docs/DECISIONS.md`, "Phase 6:
+  Dependency-security review and applied fixes," for the complete
+  disposition of every finding, including the ones already resolved this
+  phase (`next`, `next-auth`, and part of the `prisma` chain).
 - No production cloud infrastructure, Kubernetes, queues, or public signup
   — intentionally out of scope for this MVP (`docs/SPEC.md` §3).
 
@@ -569,7 +617,7 @@ and `docs/ARCHITECTURE.md`.
 | **3** | **Core workflow UI (dashboard, event entry, audit shell on real data) — done**                |
 | **4** | **AI impact analysis (LLMProvider, mock/live, structured output, retry) — done**              |
 | **5** | **Approval and audit (state machine, apply preview, transactional apply, audit) — done**      |
-| 6     | Security and evals (threat model, prompt-injection defenses, evals)                           |
+| **6** | **Security and evals (threat model, prompt-injection defenses, rate limiter, evals) — done**  |
 | 7     | Graph and MCP (React Flow thread view, read-only MCP server)                                  |
 | 8     | Delivery (full CI, Docker, browser tests, live eval, polish)                                  |
 

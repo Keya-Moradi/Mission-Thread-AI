@@ -8,8 +8,11 @@ shell), Phase 2 (deterministic program-analysis services), Phase 3 (core
 workflow UI: dashboard, program overview, event entry, audit shell), Phase 4
 (AI impact analysis: provider abstraction, mock/live providers,
 structured-output validation, orchestration, analysis workspace, readiness
-briefing), and Phase 5 (approval/apply workflow: decision state machine,
-apply preview, transactional apply, append-only audit) are complete.
+briefing), Phase 5 (approval/apply workflow: decision state machine, apply
+preview, transactional apply, append-only audit), and Phase 6 (security and
+evaluations: threat model, prompt-injection defenses, in-memory analysis
+rate limiter, mock evaluation suite, guarded live-eval command, dependency
+review) are complete.
 
 ## Workspaces
 
@@ -529,6 +532,117 @@ status, and safe error category — never an API key, token, prompt, raw
 provider output, full untrusted text, database URL, or credential. Takes an
 injectable sink so it's directly unit-testable. Trace IDs are surfaced in
 the analysis workspace (every attempt) and the readiness briefing.
+
+## Security — implemented (Phase 6)
+
+Full detail, including per-threat likelihood/impact/controls/residual risk,
+is in `docs/THREAT_MODEL.md`. Summary of what's newly implemented:
+
+**Trust boundaries.** `docs/THREAT_MODEL.md` documents and diagrams
+(Mermaid) the full chain: browser → server actions/pages → authorization +
+validation → bounded model-input projection → LLM provider → output
+validation → human approval → transactional apply → audit. Every boundary
+already established in Phases 1-5 (client/server, session/database-role,
+trusted-facts/untrusted-text, application/database,
+application/provider, dev/test/CI database) is restated there as the
+authoritative reference, not re-engineered.
+
+**Centralized provider-output validation.** `validateProviderOutput(rawOutput:
+unknown, modelInput: ModelInputProjection)`
+(`packages/core/src/ai/validate-provider-output.ts`) is now the single
+authoritative implementation of structural (Zod) + semantic/source
+validation — never throws, never touches the database. `orchestrator.ts`'s
+`runProviderAndValidate()` calls it directly instead of inlining the two
+stages; `evals/scenarios.ts` and dedicated tests call the identical
+function, so there is exactly one place "what makes a provider response
+safe" is defined.
+
+**Prompt-injection defenses.** Unchanged in design from Phase 4 (data
+isolation + fixed system instructions + bounded projection + strict
+structural validation + semantic/source validation + human approval + no
+provider write capability), now with direct tests
+(`packages/core/src/ai/prompt-injection-boundary.test.ts`) proving: the
+seeded event's real injection phrase appears only in `untrustedData`, never
+elsewhere in the model-input projection; the fixed system prompt has zero
+event-specific data for any event; the user prompt embeds `untrustedData`
+exactly once, as labeled JSON data, never interpolated prose. A
+phrase-based canary check is used only as an evaluation expectation
+(`evals/scenarios.ts`'s `prompt-injection-in-supplier-notes` scenario),
+never as the actual authorization/safety boundary — see
+`docs/THREAT_MODEL.md`.
+
+**In-memory analysis rate limiter.**
+`packages/core/src/security/analysis-rate-limiter.ts`'s `AnalysisRateLimiter`
+— fixed-window, injectable clock, `ANALYSIS_RATE_LIMIT_MAX_REQUESTS = 3` /
+`ANALYSIS_RATE_LIMIT_WINDOW_SECONDS = 60` as named constants, keyed by the
+authenticated actor's user ID (never a client IP), lazily pruned. A single
+shared `defaultAnalysisRateLimiter` instance is the only one the production
+web path ever uses; `runImpactAnalysis(..., { rateLimiter })` accepts an
+isolated instance for tests/evals, mirroring the existing
+`options.provider`/`options.persistence` shape. Integrated into
+`runImpactAnalysis()` immediately after actor/role/event-ID/event-existence
+validation and before any evidence construction, attempt persistence, or
+provider call — checked once per top-level call, never once per retry
+attempt, so an unauthorized/malformed/nonexistent-event request never
+consumes quota and a provider retry inside one authorized run never
+consumes a second slot. A denied request returns a new `RATE_LIMITED`
+`DomainErrorCode` (with a safe `retryAfterSeconds` field) and logs a new
+`analysis.rate_limited` structured event containing only the actor ID,
+event ID, retry-after seconds, AI mode, and a fresh trace ID — never
+internal limiter state or another actor's activity. **Process-local and
+in-memory by design** (per `docs/SPEC.md` §12) — a process restart clears
+every counter, and a horizontally scaled deployment would need a shared
+store instead; not engineered around in this MVP.
+
+**Authorization/mutation regression coverage.**
+`packages/core/src/ai/orchestrator-authorization.test.ts` (role reloaded
+fresh on every request, including a mid-session demotion; AI output
+creates zero `Decision`/`ProposedChange` rows under any outcome;
+`packages/core/src/ai/*.ts` has no import from `../approvals` at all — a
+structural proof the AI layer has no code path capable of invoking the
+approval/apply services), `packages/core/src/security/audit-immutability.test.ts`
+(a static source scan proving no application code anywhere calls
+`auditEvent.update`/`.delete`/`.upsert`), and `apps/web/src/security-boundary.test.ts`
+(no `page.tsx` imports a mutation function directly; no `actions.ts` reads
+a client-supplied `actorId`/`userId`/`role` field from `FormData`).
+
+## Evaluations — implemented (Phase 6)
+
+`evals/` — full detail in `evals/README.md`. `npm run eval:mock`:
+deterministic, offline, zero network calls, independent of any database,
+exits nonzero on any scenario failure. Reuses the production
+`generateMockImpactAnalysis()` and `validateProviderOutput()` directly —
+never a second, eval-only reimplementation. Eight required scenarios
+(`evals/scenarios.ts`): supplier delay affecting multiple milestones,
+failed-test verification gap, missing budget data, prompt injection in
+supplier notes, insufficient evidence/low confidence, invalid source ID,
+wrong mitigation-option count, unauthorized-mutation-shaped extra output
+fields — the last three adversarial, each built by mutating one field of a
+real, valid mock output rather than a hand-typed object. Every check tags
+itself with one of twelve fixed metric categories
+(structural/semantic validity, source-ID/record-type correctness,
+deterministic date/cost equality, exactly-three-options,
+exactly-one-recommendation, unknown handling, confidence behavior,
+prompt-injection resistance, no-fabrication, approval/mutation-boundary
+enforcement); `evals/runner.ts` aggregates per-scenario and per-metric
+results, `evals/reporters.ts` prints a console summary and writes
+machine-readable JSON to the gitignored `evals/.output/`.
+
+`npm run eval:live` (`evals/run-live.ts`) fails closed unless `AI_MODE=live`
+
+- `RUN_LIVE_EVALS=true` + a real `OPENAI_API_KEY` are all set (exact-value
+  checks, never truthy checks). It calls `createProviderFromEnv()` →
+  `provider.generateImpactAnalysis()` directly — never `runImpactAnalysis()`
+  — so it never touches Prisma or any database, and never creates a
+  `Decision`/`ProposedChange` row. Capped at 6 calls (one per fixture, the
+  five non-adversarial scenarios' fixtures plus the adversarial-notes
+  prompt-injection fixture), no retry beyond one attempt per fixture, every
+  response validated through the same `validateProviderOutput()`. **Not
+  executed during Phase 6** — Phase 8 owns the one authorized, sanitized live
+  run and `docs/EVAL_RESULTS.md`, per `docs/SPEC.md` §13.
+
+Mock evals demonstrate pipeline and policy behavior, not general live-model
+quality — see `evals/README.md`'s "What these prove (and don't)".
 
 ## Deployment (MVP)
 

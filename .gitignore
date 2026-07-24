@@ -40,6 +40,12 @@ coverage/
 .nyc_output/
 vitest.config.*.timestamp-*
 
+# Eval run output — machine-readable reports, never committed (may reflect
+# provider output shapes and should not be mistaken for a checked-in result;
+# see docs/EVAL_RESULTS.md, owned by Phase 8, for the one sanctioned
+# checked-in summary).
+evals/.output/
+
 # Playwright
 playwright-report/
 test-results/

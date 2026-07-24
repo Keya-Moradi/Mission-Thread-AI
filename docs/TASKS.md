@@ -294,7 +294,150 @@ database-isolation repair" entry.
 - [x] Docs: `docs/DECISIONS.md` (1 new entry plus a superseded-notice amendment on the prior Playwright-cleanup entry), `docs/ARCHITECTURE.md` (new "Playwright database isolation" paragraph), `README.md`, this file.
 - [x] Quality gate: all non-destructive checks (`node -v`, `npm ci`, `db:validate`, `db:generate`, `lint`, `format:check`, `typecheck`, `test`, `build`, `smoke:test`) run and passed before any destructive command. Fresh `AskUserQuestion` authorization obtained before the one `db:reset:test` this pass performed; `npm run test:e2e` then run twice with no further reset (both passed), plus a third run with an ambient `DATABASE_URL` environment variable deliberately set to `missionthread_dev` on the command itself (no reset performed) — confirmed to still use only `missionthread_test` throughout. No Phase 6 work was added.
 
-## Phase 6 — Security and evals (not started)
+## Phase 6 — Security and evals — done (2026-07-24)
+
+Threat model, strengthened/testable prompt-injection boundaries, an
+in-memory analysis rate limiter, a full deterministic mock evaluation
+suite, a guarded (not-executed) `eval:live` command, and a dependency
+security review. Full disposition is in `docs/DECISIONS.md`'s "(Phase 6)"
+entries and `docs/THREAT_MODEL.md`.
+
+- [x] `docs/THREAT_MODEL.md`: assets, actors, trust boundaries (with a
+      Mermaid diagram), and all 15 `docs/SPEC.md` §12 required threats
+      (prompt injection, broken authorization, unauthorized mutation, data
+      exfiltration, hallucinated facts/IDs, tampered evidence, excessive
+      permissions, audit tampering, secret exposure, denial-of-wallet,
+      denial-of-service, unsafe logs, session theft, CSRF, insecure
+      dependencies) — each with affected asset, attack path, likelihood,
+      impact, existing controls, Phase 6 controls, residual risk, and
+      verification method. States explicitly: audit records/evidence
+      snapshots are application-level append-only, not cryptographically
+      immutable; the rate limiter is process-local; the demo Credentials
+      authentication is not a complete production identity system; direct
+      database administrators remain outside every application-level
+      immutability guarantee.
+- [x] `validateProviderOutput()` (`packages/core/src/ai/validate-provider-output.ts`)
+      extracted as the single authoritative structural+semantic validation
+      function — never throws, never touches the database — reused
+      unchanged by `orchestrator.ts`'s `runProviderAndValidate()`, the mock
+      evaluation suite, and dedicated tests.
+- [x] Prompt-injection/untrusted-data tests
+      (`packages/core/src/ai/prompt-injection-boundary.test.ts`): the
+      seeded event's real injection phrase appears only in
+      `untrustedData`, never elsewhere in the model-input projection or in
+      the evidence allowlist/trusted facts; the fixed system prompt
+      contains zero event-specific data for any event and states the
+      untrusted-data rule explicitly; the user prompt embeds the phrase
+      exactly once, as labeled JSON data, never interpolated prose.
+- [x] `packages/core/src/security/analysis-rate-limiter.ts`: in-memory
+      fixed-window limiter, injectable clock, `ANALYSIS_RATE_LIMIT_MAX_REQUESTS = 3`
+      / `ANALYSIS_RATE_LIMIT_WINDOW_SECONDS = 60` as named constants, lazy
+      pruning, a `defaultAnalysisRateLimiter` singleton for production and
+      an injectable isolated instance for tests/evals. A real bug (the
+      very first request for a new key always passed regardless of
+      `maxRequests`, including `maxRequests: 0`) was found via this
+      module's own tests and fixed before being relied on elsewhere.
+- [x] Rate limiter integrated into `runImpactAnalysis()` immediately after
+      actor/role/event-ID/event-existence validation and before evidence
+      construction, persistence, or the provider call — checked once per
+      top-level call, not once per retry attempt. New `RATE_LIMITED`
+      `DomainErrorCode` + `rateLimited()` constructor
+      (`packages/core/src/analysis/types.ts`); new `analysis.rate_limited`
+      structured log event with an optional `retryAfterSeconds` field
+      (`packages/core/src/ai/logging.ts`); `apps/web`'s existing generic
+      error-redirect path needed no code change.
+- [x] Rate-limiter tests: `packages/core/src/security/analysis-rate-limiter.test.ts`
+      (pure, no database — first-N-pass/N+1-denied, window reset,
+      independent actors, custom thresholds including the `maxRequests: 0`
+      regression, pruning) and `packages/core/src/ai/orchestrator-rate-limit.test.ts`
+      (DB-backed, real orchestrator — provider retries inside one call
+      consume exactly one slot, unauthorized/malformed-event-ID/nonexistent-event
+      never consume a slot, a denied request creates zero rows and calls
+      the provider zero times, safe retry-after info in the returned
+      error, no secrets/untrusted text in the log line, two distinct real
+      actors under one shared limiter).
+- [x] `packages/core/src/ai/orchestrator-authorization.test.ts`: role
+      reloaded fresh on every request (a mid-session demotion takes effect
+      on the very next call), AI output creates zero `Decision`/`ProposedChange`
+      rows under any outcome, and `packages/core/src/ai/*.ts` has no import
+      from `../approvals` at all (structural proof the AI layer has no
+      code path capable of invoking the approval/apply services).
+      `packages/core/src/security/audit-immutability.test.ts`: a static
+      source scan proving no application code anywhere calls
+      `auditEvent.update`/`.delete`/`.upsert`.
+      `apps/web/src/security-boundary.test.ts`: no `page.tsx` imports a
+      mutation function directly (every mutation is reached only through a
+      `"use server"` actions file), and no `actions.ts` ever reads a
+      client-supplied `actorId`/`userId`/`role` field from `FormData`.
+- [x] `evals/` mock evaluation suite: `scenarios.ts` (8 required
+      scenarios — supplier delay/multi-milestone, failed-test verification
+      gap, missing budget data, prompt injection in supplier notes,
+      insufficient evidence/low confidence, invalid source ID, wrong
+      mitigation-option count, unauthorized-mutation-shaped extra fields),
+      `runner.ts`, `reporters.ts`, `fixtures/model-inputs.ts`,
+      `run-mock.ts`/`run-live.ts`, `README.md`, `tsconfig.json`. New root
+      commands `npm run eval:mock` (deterministic, offline, zero network
+      calls, exits nonzero on any failure — 8/8 scenarios and all 12
+      tagged metrics pass) and `npm run eval:live` (fails closed without
+      `AI_MODE=live` + `RUN_LIVE_EVALS=true` + `OPENAI_API_KEY`; calls the
+      provider directly, never `runImpactAnalysis()`, so it never touches
+      any database; capped at 6 calls; **not executed this phase**).
+- [x] Dependency security review: `npm audit --json` reviewed and every
+      finding classified (advisory ID, package, direct/transitive,
+      production/development path, reachable surface, installed vs.
+      patched version, compatible-fix availability, recommended action,
+      residual risk) — see `docs/DECISIONS.md`. Applied: `next-auth`
+      `5.0.0-beta.31` → `5.0.0-beta.32` (resolved 2 critical + 1 high + 1
+      moderate finding in the authentication library itself), `next`
+      `16.2.10` → `16.2.11` (resolved 4 high + 3 moderate findings in the
+      framework), `prisma` `7.8.0` → `7.9.0` via `npm audit fix` (resolved
+      the `@hono/node-server` chain entirely). Deferred with documented
+      reachability analysis: `@prisma/dev`'s remaining `find-my-way`/`valibot`
+      chain (optional `prisma dev` tooling, never invoked anywhere in this
+      repository) and `next`'s internally-bundled `postcss`/`sharp`
+      (unreachable — this app processes no attacker-controlled CSS and
+      never imports `next/image`); the only available "fix" for the latter
+      is a 7-major-version downgrade of Next.js, explicitly rejected as a
+      worse trade than the advisories themselves, per the same reasoning
+      already applied in Phase 1. `allowScripts` in the root `package.json`
+      updated to match the new `prisma`/`@prisma/engines` versions.
+- [x] Docs: `docs/THREAT_MODEL.md` (new), `docs/DECISIONS.md` (9 new
+      "(Phase 6)" entries), `docs/ARCHITECTURE.md` (new "Security — Phase
+      6" and "Evaluations — Phase 6" sections), `README.md` (status,
+      security section, mock-vs-live evals, roadmap, limitations), this
+      file, `evals/README.md`.
+- [x] 36 new test files/additions: `prompt-injection-boundary.test.ts`,
+      `validate-provider-output.test.ts`, `orchestrator-authorization.test.ts`,
+      `orchestrator-rate-limit.test.ts`, `analysis-rate-limiter.test.ts`,
+      `audit-immutability.test.ts` (core) and `security-boundary.test.ts`
+      (web) — 620 core tests (580 → 620) + 36 web tests (34 → 36) = 656
+      total. The one pre-existing file needing a change was
+      `orchestrator.test.ts`, which gained a single `beforeEach` resetting
+      the shared default rate limiter (many of its ~20 pre-existing tests
+      call `runImpactAnalysis()` repeatedly against the same actor without
+      injecting an isolated limiter, and none of them are about rate
+      limiting) — no existing test body was rewritten.
+- [x] Quality gate: `node -v`, `npm ci`-equivalent install, `db:validate`,
+      `db:generate`, `lint`, `format:check`, `typecheck` (all workspaces +
+      `evals/`), `test` (656), `build`, `smoke:test` (82/82), `eval:mock`
+      (8/8 scenarios, all 12 metrics), `npm audit --json` (reviewed and
+      classified, not falsely reported green while advisories remain) all
+      passing before any destructive operation. Fresh `AskUserQuestion`
+      authorization obtained for `db:reset:test`; a new third-party Prisma
+      CLI guardrail (blocking AI agents from running `prisma migrate reset
+--force` without an explicit `PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION`
+      environment variable containing the user's own verbatim consent) was
+      encountered and honored, not bypassed — the exact text of the
+      already-obtained structured consent was passed through, never
+      fabricated. `db:reset:test` then `test:e2e` (1/1) run, followed by a
+      second `test:e2e` run with no further reset (also 1/1), confirming
+      repeatability. Confirmed throughout: CI still `AI_MODE=mock`; no
+      live-provider call was made at any point; rate-limited requests call
+      the provider zero times and persist zero rows; AI output cannot
+      approve or apply anything; no secret/untrusted text appears in any
+      log line, test output, or committed fixture; `evals/` fixtures are
+      100% fictional/synthetic; no Phase 7 (React Flow/MCP) or Phase 8
+      (delivery/live-eval) functionality was added.
 
 ## Phase 7 — Graph and MCP (not started)
 

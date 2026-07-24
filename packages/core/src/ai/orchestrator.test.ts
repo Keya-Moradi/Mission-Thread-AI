@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "../db";
 import { DEMO_USER_IDS, EVENT_IDS } from "../seed/ids";
+import { defaultAnalysisRateLimiter } from "../security/analysis-rate-limiter";
 import { AiConfigurationError, AiProviderError } from "./errors";
 import { generateMockImpactAnalysis, MockLLMProvider } from "./mock-provider";
 import {
@@ -121,6 +122,17 @@ async function cleanupAnalysisRun(analysisRunId: string) {
   await prisma.mitigationOption.deleteMany({ where: { impactAnalysisId: { in: ids } } });
   await prisma.impactAnalysis.deleteMany({ where: { id: { in: ids } } });
 }
+
+// This file predates the Phase 6 analysis rate limiter and exercises
+// runImpactAnalysis() many times in a row against the same seeded Program
+// Manager actor without injecting an isolated limiter — none of these
+// tests are about rate limiting itself (see orchestrator-rate-limit.test.ts
+// for that), so resetting the shared default limiter before every test
+// keeps it from incidentally interfering with unrelated assertions. See
+// AnalysisRateLimiter.reset()'s own doc comment.
+beforeEach(() => {
+  defaultAnalysisRateLimiter.reset();
+});
 
 afterEach(async () => {
   for (const runId of createdAnalysisRunIds) {

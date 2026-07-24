@@ -28,6 +28,10 @@ export {
   validateImpactAnalysisSemantics,
   type SemanticValidationResult,
 } from "./output-validation";
+export {
+  validateProviderOutput,
+  type ProviderOutputValidationResult,
+} from "./validate-provider-output";
 export { MockLLMProvider, generateMockImpactAnalysis } from "./mock-provider";
 export { OpenAiImpactAnalysisProvider } from "./openai-provider";
 export {

@@ -9,7 +9,8 @@ import type { RecordTypeValue } from "../record-types";
  */
 export type ServiceResult<T> = { ok: true; data: T } | { ok: false; error: DomainError };
 
-export type DomainErrorCode = "NOT_FOUND" | "VALIDATION_ERROR" | "FORBIDDEN" | "CONFLICT";
+export type DomainErrorCode =
+  "NOT_FOUND" | "VALIDATION_ERROR" | "FORBIDDEN" | "CONFLICT" | "RATE_LIMITED";
 
 export interface DomainError {
   code: DomainErrorCode;
@@ -19,6 +20,8 @@ export interface DomainError {
   entityId?: string;
   /** Always safe to log or display — never includes raw database rows. */
   message: string;
+  /** RATE_LIMITED only — how many seconds until the caller may retry. */
+  retryAfterSeconds?: number;
 }
 
 export function ok<T>(data: T): ServiceResult<T> {
@@ -64,6 +67,18 @@ export function forbidden<T>(message: string): ServiceResult<T> {
  * existed): a `CONFLICT` record exists and the input is well-formed, but
  * applying it now would silently overwrite a change nobody approved.
  */
+/**
+ * For a caller who is otherwise authorized but has exceeded the analysis
+ * rate limit (see packages/core/src/security/analysis-rate-limiter.ts).
+ * `message` must already be safe to display verbatim to the end user — it
+ * is shown directly in apps/web, exactly like every other DomainError
+ * message. `retryAfterSeconds` is the only extra detail ever surfaced;
+ * never the limiter's internal counters or other actors' activity.
+ */
+export function rateLimited<T>(retryAfterSeconds: number, message: string): ServiceResult<T> {
+  return { ok: false, error: { code: "RATE_LIMITED", message, retryAfterSeconds } };
+}
+
 export function conflict<T>(
   entityType: DomainError["entityType"],
   entityId: string,
