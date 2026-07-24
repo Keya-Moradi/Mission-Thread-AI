@@ -500,6 +500,25 @@ stale/conflict warnings). The analysis workspace shows each option's
 decision status, actor, and rationale inline. See `docs/DECISIONS.md` for
 the full design and every verified edge case.
 
+**Playwright database isolation.** The Playwright worker process and the
+`next start` web server it drives are separate processes with separate
+environment-inheritance rules — an ambient shell `DATABASE_URL` (e.g.
+already pointed at `missionthread_dev` for normal local development) can
+survive into one without affecting the other unless something explicitly
+overrides it in both. `apps/web/e2e/playwright-test-environment.ts`'s
+`resolvePlaywrightTestEnvironment()` is the one place that decides this
+suite's database target, reusing `packages/core/src/db-safety.ts`'s exact
+approved-target tuples (via a `@missionthread/core/db-safety` package
+subpath that never pulls in `db.ts`'s eagerly-constructed Prisma client);
+`playwright.config.ts` loads `.env.test` with explicit `override: true`
+and applies the one resolved environment to both the worker process and
+`webServer.env`. `e2e/decision-workflow.spec.ts` never statically imports
+`@missionthread/core` — `assertPlaywrightTestDatabaseTarget()` re-verifies
+the target immediately before a guarded, lazy import ever constructs a
+Prisma client, and a live `SELECT current_database()` confirms the actual
+connection. See `docs/DECISIONS.md`, "Playwright database-isolation
+repair".
+
 ## Observability — implemented (Phase 4)
 
 `packages/core/src/ai/logging.ts`'s `logAnalysisEvent()` emits one line of

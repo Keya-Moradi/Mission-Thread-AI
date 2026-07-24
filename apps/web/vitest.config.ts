@@ -8,6 +8,10 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    // "e2e/**/*.test.ts" covers playwright-test-environment.test.ts — a
+    // plain pure-function unit test living next to the Playwright module
+    // it tests. Playwright's own config restricts itself to "*.spec.ts"
+    // specifically so the two tools never both try to run the same file.
+    include: ["src/**/*.test.ts", "e2e/**/*.test.ts"],
   },
 });

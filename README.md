@@ -324,6 +324,21 @@ one step — its name states plainly that it's destructive, unlike a bare
 npm run test:e2e:reset:test:destructive   # db:reset:test, then test:e2e — requires the same fresh authorization as db:reset:test alone
 ```
 
+**Database isolation.** `npm run test:e2e` always uses `missionthread_test`,
+regardless of what `DATABASE_URL` your shell already has set (e.g. from
+ordinary local development against `missionthread_dev`) — an ambient shell
+variable cannot control which database the Playwright worker connects to.
+`playwright.config.ts` loads `.env.test` with explicit `override: true`
+and applies the one resolved, validated environment identically to both
+the Playwright worker process and the Next.js web server it drives; the
+approved targets are exactly `localhost:55432/missionthread_test` and
+`127.0.0.1:55432/missionthread_test` (reusing the same allowlist every
+other destructive-operation guard in this repo already uses —
+`packages/core/src/db-safety.ts`). `e2e/decision-workflow.spec.ts` never
+imports a database client until it has independently re-verified that
+target, immediately before doing so. See `docs/DECISIONS.md`, "Playwright
+database-isolation repair."
+
 All of the above except `test:e2e` are run in CI (`.github/workflows/ci.yml`)
 with `AI_MODE=mock`, so the pipeline never needs a live model API key.
 

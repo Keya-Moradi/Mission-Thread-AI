@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { prisma } from "@missionthread/core";
+import { assertPlaywrightTestDatabaseTarget } from "./playwright-test-environment";
 
 // The seeded Program Manager and demonstration analysis (packages/core/src/
 // seed/ids.ts, prisma/seed.ts) — fixed across every reset, matching
@@ -14,9 +14,59 @@ const NEW_MILESTONE_DATE = "2027-03-01";
 
 test.describe.configure({ mode: "serial" });
 
+/**
+ * `@missionthread/core`'s root barrel re-exports `db.ts`'s `prisma`, which
+ * constructs a real PrismaClient — reading `process.env.DATABASE_URL` —
+ * the moment it's imported. A static top-level `import { prisma } from
+ * "@missionthread/core"` would therefore have already connected before
+ * this file gets any chance to check what it's connecting to.
+ * `assertPlaywrightTestDatabaseTarget()` runs first, against whatever
+ * `playwright.config.ts` actually resolved this process's `DATABASE_URL`
+ * to be — never assuming that resolution definitely happened — and only
+ * the `require()` call after it ever triggers Prisma's construction.
+ * Deliberately `require()`, not `await import()`: Playwright compiles this
+ * file to CommonJS and installs its own `require` hook to transpile
+ * workspace `.ts` sources on demand (the same mechanism that already
+ * resolves `@missionthread/core/db-safety` in playwright-test-environment.ts);
+ * a genuine ESM dynamic `import()` from inside that CommonJS module instead
+ * goes through Node's own native loader for a second, independent load of
+ * the same package, which produced a real, reproducible failure resolving
+ * `packages/core/src/db-safety.ts`'s named exports from within
+ * `index.ts`'s re-export. Staying on the one loader `db-safety`'s own
+ * subpath import already proved works avoids that entirely. See
+ * docs/DECISIONS.md, "Phase 5 correction: Playwright database-isolation
+ * repair".
+ */
+async function getPlaywrightTestPrisma() {
+  assertPlaywrightTestDatabaseTarget(process.env);
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- deliberate: see the doc comment above for why this must stay require(), not await import().
+  const { prisma } = require("@missionthread/core") as typeof import("@missionthread/core");
+
+  // Belt-and-suspenders beyond the URL-tuple check above: the database
+  // name alone (checked here) doesn't verify host/port, which is exactly
+  // why the tuple check above remains mandatory — but confirming the
+  // *actual live connection* reports the expected database catches
+  // anything the URL string alone couldn't (e.g. a DNS/connection-pooling
+  // layer silently redirecting somewhere else).
+  const rows = await prisma.$queryRaw<{ current_database: string }[]>`SELECT current_database()`;
+  const currentDatabase = rows[0]?.current_database;
+  if (currentDatabase !== "missionthread_test") {
+    throw new Error(
+      `Refusing to proceed: the active database connection reports "${currentDatabase}", expected "missionthread_test".`,
+    );
+  }
+
+  return prisma;
+}
+
 test("Program Manager approves a mitigation option and applies its proposed change", async ({
   page,
 }) => {
+  // Throws before any query — including this test's own cleanup — can run
+  // if the active database target isn't an approved local test tuple. See
+  // getPlaywrightTestPrisma()'s own doc comment above.
+  const prisma = await getPlaywrightTestPrisma();
+
   // Captured before this test changes anything, so the milestone can be
   // restored to its exact prior value afterward regardless of how the test
   // finishes — this suite must never perform a full database reset in
@@ -101,7 +151,8 @@ test("Program Manager approves a mitigation option and applies its proposed chan
     // another reset — never a full database reset here. Every step is
     // idempotent (deleteMany/updateMany, not delete/update) so this still
     // runs safely even if the test failed partway through and some of
-    // these records were never created.
+    // these records were never created. Never reached at all if
+    // getPlaywrightTestPrisma() above ever threw — see its doc comment.
     if (optionId) {
       await prisma.auditEvent.deleteMany({
         where: {
