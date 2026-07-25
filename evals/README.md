@@ -69,7 +69,10 @@ specific model/prompt combination actually exercised.
 6. **`invalid-source-id`** — a scripted (hand-mutated) output cites a
    source ID absent from the evidence allowlist. Verifies
    `validateProviderOutput()` rejects it as `SEMANTIC_VALIDATION_FAILED`
-   and names the invalid ID in its errors.
+   and identifies the invalid citation by field path/index (e.g.
+   `"sourceRecordIds[0] is not in the supplied evidence allowlist."`) —
+   never by echoing the invalid ID itself back into the error (see
+   "Provider-spend and output-bounds" in `docs/ARCHITECTURE.md`).
 7. **`wrong-mitigation-option-count`** — a scripted output supplies only
    two mitigation options. Verifies rejection as `INVALID_OUTPUT_SCHEMA`.
 8. **`unauthorized-mutation-proposal`** — a scripted output adds
@@ -148,14 +151,27 @@ When it does run, it:
   scripted-output scenarios test the local validator against a hand-mutated
   response and have nothing to learn from a real model call, so they're
   excluded here).
-- Is capped at exactly six calls (`MAX_LIVE_PROVIDER_CALLS`, one per
-  fixture) — no loop, no retry beyond the one attempt per fixture (the
-  orchestrator's own one-retry-on-validation-failure policy is a
-  production concern this script does not replicate, since doing so would
-  double an already-capped worst-case call count for what's meant to be a
-  small, bounded sanity check).
+- Is capped at **exactly six real HTTP requests**, not just six intended
+  calls: `MAX_LIVE_PROVIDER_CALLS` (= `LIVE_EVAL_FIXTURES.length`) is one
+  loop iteration per fixture with no retry/while construct around the
+  provider call (verified directly —
+  `packages/core/src/security/live-eval-call-cap.test.ts` reads this
+  file's own source and asserts both facts), and
+  `OpenAiImpactAnalysisProvider` — the exact same class production
+  analyses use — disables the OpenAI SDK's own automatic retries
+  (`OPENAI_SDK_MAX_RETRIES = 0`) and bounds every request to a 60-second
+  timeout and an `IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS = 8192` response-size
+  ceiling, so one `generateImpactAnalysis()` call is always exactly one
+  HTTP attempt (verified in `packages/core/src/ai/openai-provider.test.ts`).
+  This script additionally never replicates the orchestrator's own
+  one-retry-on-validation-failure policy — doing so would double an
+  already-capped worst-case call count for what's meant to be a small,
+  bounded sanity check, not a full pipeline exercise.
 - Runs every response through the same production `validateProviderOutput()`
-  as the mock suite and everywhere else.
+  as the mock suite and everywhere else — including the same pre-validation
+  total-size guard, per-string output bounds, and redacted/bounded
+  validation-error reporting (see "Provider-spend and output-bounds" in
+  `docs/ARCHITECTURE.md`).
 - Never logs a prompt, a fixture's untrusted-notes text, or the API key —
   only safe structural metadata (provider name, model, duration,
   valid/invalid, error category/count).

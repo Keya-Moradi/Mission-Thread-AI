@@ -30,10 +30,21 @@ export {
 } from "./output-validation";
 export {
   validateProviderOutput,
+  sanitizeProviderValidationErrors,
+  MAX_PROVIDER_OUTPUT_BYTES,
+  MAX_VALIDATION_ERROR_COUNT,
+  MAX_VALIDATION_ERROR_LENGTH,
+  MAX_VALIDATION_FEEDBACK_BYTES,
   type ProviderOutputValidationResult,
 } from "./validate-provider-output";
 export { MockLLMProvider, generateMockImpactAnalysis } from "./mock-provider";
-export { OpenAiImpactAnalysisProvider } from "./openai-provider";
+export {
+  OpenAiImpactAnalysisProvider,
+  buildOpenAiClientOptions,
+  OPENAI_SDK_MAX_RETRIES,
+  OPENAI_REQUEST_TIMEOUT_MS,
+  IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS,
+} from "./openai-provider";
 export {
   assertOpenAiCompatibleJsonSchema,
   buildOpenAiImpactAnalysisJsonSchema,

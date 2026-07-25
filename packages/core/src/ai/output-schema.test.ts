@@ -4,6 +4,7 @@ import {
   MAX_DECIMAL_12_2_INTEGER_DIGITS,
   MAX_MITIGATION_SCHEDULE_IMPACT_DAYS,
   MIN_MITIGATION_SCHEDULE_IMPACT_DAYS,
+  OUTPUT_LIMITS,
   persistedMoneyStringSchema,
 } from "./output-schema";
 
@@ -169,6 +170,99 @@ describe("impactAnalysisOutputSchema — field constraints", () => {
   it("[invalid confidence] rejects a value outside LOW/MEDIUM/HIGH", () => {
     const result = impactAnalysisOutputSchema.safeParse(validOutput({ confidence: "VERY_HIGH" }));
     expect(result.success).toBe(false);
+  });
+});
+
+describe("impactAnalysisOutputSchema — Phase 6 correction: complete per-string output bounds", () => {
+  it("[oversized assumption] a one-million-character assumption is rejected", () => {
+    const result = impactAnalysisOutputSchema.safeParse(
+      validOutput({ assumptions: ["x".repeat(1_000_000)] }),
+    );
+    expect(result.success).toBe(false);
+  });
+
+  it("[oversized unknown] a one-million-character unknown is rejected", () => {
+    const result = impactAnalysisOutputSchema.safeParse(
+      validOutput({ unknowns: ["x".repeat(1_000_000)] }),
+    );
+    expect(result.success).toBe(false);
+  });
+
+  it("[assumption at the documented boundary] passes at exactly maxAssumptionLength", () => {
+    const result = impactAnalysisOutputSchema.safeParse(
+      validOutput({ assumptions: ["x".repeat(OUTPUT_LIMITS.maxAssumptionLength)] }),
+    );
+    expect(result.success).toBe(true);
+  });
+
+  it("[unknown at the documented boundary] passes at exactly maxUnknownLength", () => {
+    const result = impactAnalysisOutputSchema.safeParse(
+      validOutput({ unknowns: ["x".repeat(OUTPUT_LIMITS.maxUnknownLength)] }),
+    );
+    expect(result.success).toBe(true);
+  });
+
+  it("[oversized top-level source ID] an oversized sourceRecordIds entry is rejected structurally", () => {
+    const result = impactAnalysisOutputSchema.safeParse(
+      validOutput({ sourceRecordIds: ["x".repeat(10_000)] }),
+    );
+    expect(result.success).toBe(false);
+  });
+
+  it("[oversized affected requirement ID] rejected structurally", () => {
+    const result = impactAnalysisOutputSchema.safeParse(
+      validOutput({ affectedRequirementIds: ["x".repeat(10_000)] }),
+    );
+    expect(result.success).toBe(false);
+  });
+
+  it("[oversized affected milestone ID] rejected structurally", () => {
+    const result = impactAnalysisOutputSchema.safeParse(
+      validOutput({ affectedMilestoneIds: ["x".repeat(10_000)] }),
+    );
+    expect(result.success).toBe(false);
+  });
+
+  it("[oversized per-option source ID] rejected structurally", () => {
+    const result = impactAnalysisOutputSchema.safeParse(
+      validOutput({
+        mitigationOptions: [
+          validOption({ isRecommended: true, sourceRecordIds: ["x".repeat(10_000)] }),
+          validOption(),
+          validOption(),
+        ],
+      }),
+    );
+    expect(result.success).toBe(false);
+  });
+
+  it("[oversized verification-gap requirement ID] rejected structurally", () => {
+    const result = impactAnalysisOutputSchema.safeParse(
+      validOutput({
+        verificationGaps: [
+          { requirementId: "x".repeat(10_000), category: "FAILED", summary: "gap" },
+        ],
+      }),
+    );
+    expect(result.success).toBe(false);
+  });
+
+  it("[oversized verification category] rejected structurally", () => {
+    const result = impactAnalysisOutputSchema.safeParse(
+      validOutput({
+        verificationGaps: [
+          { requirementId: "REQ-001", category: "x".repeat(10_000), summary: "gap" },
+        ],
+      }),
+    );
+    expect(result.success).toBe(false);
+  });
+
+  it("[record ID at the documented boundary] passes at exactly maxRecordIdLength", () => {
+    const result = impactAnalysisOutputSchema.safeParse(
+      validOutput({ sourceRecordIds: ["x".repeat(OUTPUT_LIMITS.maxRecordIdLength)] }),
+    );
+    expect(result.success).toBe(true);
   });
 });
 

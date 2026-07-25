@@ -384,8 +384,12 @@ const invalidSourceId: EvalScenario = {
         "rejected for citing a non-allowlisted source ID",
       ),
       check(
-        "the invalid source ID is named in the returned errors",
-        !result.valid && result.errors.some((e) => e.includes("FAKE-RECORD-DOES-NOT-EXIST")),
+        "the invalid citation is identified by field path/index, and the fabricated ID itself never appears in the returned errors",
+        !result.valid &&
+          result.errors.some((e) =>
+            /^sourceRecordIds\[\d+\] is not in the supplied evidence allowlist\.$/.test(e),
+          ) &&
+          !result.errors.some((e) => e.includes("FAKE-RECORD-DOES-NOT-EXIST")),
         undefined,
         "source-id-correctness",
       ),

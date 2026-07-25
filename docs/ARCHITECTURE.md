@@ -282,27 +282,70 @@ limits, not just to what looks reasonable, is what closes that gap (see
 `docs/DECISIONS.md`, "Persistence-boundary repair: database-safe output
 constraints").
 
+**Complete per-string output bounds (Phase 6 correction).** Every output
+string that previously had no maximum length now does: a shared
+`outputRecordIdSchema` (`z.string().min(1).max(OUTPUT_LIMITS.maxRecordIdLength)`,
+128 characters) bounds `affectedRequirementIds[*]`, `affectedMilestoneIds[*]`,
+`verificationGaps[*].requirementId`, top-level `sourceRecordIds[*]`, and
+`mitigationOptions[*].sourceRecordIds[*]`; `verificationGaps[*].category`,
+`assumptions[*]`, and `unknowns[*]` each got their own explicit length
+ceiling (`maxVerificationCategoryLength`/`maxAssumptionLength`/
+`maxUnknownLength`, all in `OUTPUT_LIMITS`). Array-count limits are
+unchanged — this only closes the "one string inside an already-bounded
+array could still be arbitrarily long" gap. Oversized output fails
+structural validation outright; nothing is ever silently truncated. On top
+of that, `validateProviderOutput()`
+(`packages/core/src/ai/validate-provider-output.ts`) runs a pre-validation
+total-size guard (`MAX_PROVIDER_OUTPUT_BYTES = 65,536`) before Zod ever
+touches the raw response — a circular or unserializable value, or a
+response whose combined serialized size exceeds the ceiling, is rejected
+immediately with a fixed safe message, never partially walked and never
+echoed back. See `docs/DECISIONS.md`, "Phase 6 correction: provider-spend
+and output-bounds", and `docs/THREAT_MODEL.md`.
+
 **Provider-facing JSON Schema.** `openai-schema.ts`'s
 `buildOpenAiImpactAnalysisJsonSchema()` generates a JSON Schema from
 `impactAnalysisOutputSchema` via `z.toJSONSchema()` — still the single
-authoritative source, never a second hand-maintained schema — and then
-recursively verifies it contains none of `prefixItems`, `unevaluatedItems`,
-`contains`, `minContains`, `maxContains`, `propertyNames`,
-`patternProperties` (keywords draft-2020-12 permits but OpenAI's strict
-mode doesn't document support for), and that every object schema declares
-`additionalProperties: false` with every property listed in `required`.
-Throws rather than silently patching if a violation is ever found. Whatever
-this generates is only steering for the API — every parsed response is
-still re-validated against the authoritative Zod schema afterward,
-regardless of what the provider claims to have enforced.
+authoritative source, never a second hand-maintained schema — strips
+`minLength`/`maxLength` (confirmed unsupported by OpenAI Structured
+Outputs' strict mode — see `docs/DECISIONS.md`, "Phase 6 correction:
+provider-spend and output-bounds" — leaving them in would misrepresent
+what the provider-facing schema actually guarantees; the authoritative
+runtime Zod `.min()`/`.max()` checks are completely unaffected and remain
+the real enforcement, backed by `IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS` as the
+provider-level size ceiling) — and then recursively verifies it contains
+none of `prefixItems`, `unevaluatedItems`, `contains`, `minContains`,
+`maxContains`, `propertyNames`, `patternProperties` (keywords
+draft-2020-12 permits but OpenAI's strict mode doesn't document support
+for), and that every object schema declares `additionalProperties: false`
+with every property listed in `required`. Throws rather than silently
+patching if a disallowed-keyword violation is ever found. Whatever this
+generates is only steering for the API — every parsed response is still
+re-validated against the authoritative Zod schema afterward, regardless of
+what the provider claims to have enforced.
 
 **Providers.** `MockLLMProvider` (`AI_MODE=mock`, default for dev/CI/tests)
 wraps the pure `generateMockImpactAnalysis()`, which never invents a value
 not already present in the deterministic input. `OpenAiImpactAnalysisProvider`
 (`AI_MODE=live`) uses the official `openai` package's Responses API with
 the strict JSON-schema structured output described above, `store: false`,
-no streaming/tools/web-search/conversations. No automated test, smoke
-check, or CI step ever exercises this path.
+no streaming/tools/web-search/conversations, a server-controlled
+`max_output_tokens: IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS` (8192, covering both
+visible output and reasoning tokens) on every request, and its own SDK
+client constructed via `buildOpenAiClientOptions()` — `maxRetries: 0`,
+`timeout: OPENAI_REQUEST_TIMEOUT_MS` (60 seconds) — explicitly overriding
+the SDK's own defaults (2 automatic retries, a 10-minute timeout) so one
+provider invocation always equals exactly one HTTP request and the
+orchestrator (below) remains the sole retry authority. A response whose
+`status`/`incomplete_details.reason` reports it was truncated at the
+token ceiling is never treated as successful — it's thrown as a retryable
+`INCOMPLETE_OUTPUT` `AiProviderError`, never including the truncated text
+itself. No automated test, smoke check, or CI step ever exercises this
+path against the real API — every test here uses a fake, dependency-injected
+`responses.create`, including the SDK-configuration tests (which construct
+a real `OpenAI` client with a fake API key — safe, since construction
+alone never opens a network connection — and read its resolved
+`maxRetries`/`timeout` fields directly).
 
 **Attempt-evidence persistence.** `attempt-persistence.ts`'s
 `buildAttemptSourceReferenceSnapshot(modelInput, output?)` builds the
@@ -325,7 +368,12 @@ projection, and re-validates it at runtime against
 `modelInputProjectionSchema` before any attempt is created. Per attempt
 (max 2), five explicit stages: pending-attempt persistence, provider
 invocation, structural validation, semantic validation, success
-persistence.
+persistence. This 2-attempt cap is the **only** retry authority in the
+system (Phase 6 correction) — every `LLMProvider` implementation, live and
+mock alike, is required to make at most one underlying call per
+`generateImpactAnalysis()` invocation, so "at most 2 attempts" and "at most
+2 real HTTP requests" are the same guarantee, not two guarantees that
+happen to usually agree.
 
 - **Pending-attempt persistence** — one transaction creates the `PENDING`
   `ImpactAnalysis` row, the **complete** supplied-evidence
@@ -555,7 +603,43 @@ validation — never throws, never touches the database. `orchestrator.ts`'s
 `runProviderAndValidate()` calls it directly instead of inlining the two
 stages; `evals/scenarios.ts` and dedicated tests call the identical
 function, so there is exactly one place "what makes a provider response
-safe" is defined.
+safe" is defined. As of the Phase 6 correction pass, this same function
+also runs the pre-validation total-size guard and sanitizes every returned
+error (see "Provider-spend and output-bounds" below) — so orchestration
+and evals inherit both automatically, with no separate integration step.
+
+**Provider-spend and output-bounds (Phase 6 correction).** Four
+previously-open gaps closed together, since each compounds the others: (1)
+**the OpenAI SDK's own automatic retries and 10-minute default timeout
+were left enabled**, silently doubling the orchestrator's real worst-case
+HTTP-request count and letting a single attempt hang far past what the
+orchestrator's own 2-attempt cap implied — fixed via
+`buildOpenAiClientOptions()` (`OPENAI_SDK_MAX_RETRIES = 0`,
+`OPENAI_REQUEST_TIMEOUT_MS = 60_000`), making the orchestrator the sole
+retry authority; (2) **the live request had no `max_output_tokens`
+ceiling** — fixed with a server-controlled
+`IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS = 8192` (covering both visible output
+and reasoning tokens) sent on every request, with a truncated response
+classified as a new retryable `INCOMPLETE_OUTPUT` category rather than
+ever being treated as successful; (3) **several output string fields had
+no maximum length** — closed with a shared `outputRecordIdSchema` and new
+named limits in `OUTPUT_LIMITS` (see the AI section above); (4) **semantic
+validation echoed untrusted, provider-controlled values (fabricated IDs,
+mitigation-option titles) directly into persisted and retried validation
+errors** — every message in `output-validation.ts` now describes a field
+path/array index only (e.g. `"mitigationOptions[1].sourceRecordIds[0] is
+not in the supplied evidence allowlist."`), and a new shared
+`sanitizeProviderValidationErrors()` (`MAX_VALIDATION_ERROR_COUNT = 20`,
+`MAX_VALIDATION_ERROR_LENGTH = 240`, `MAX_VALIDATION_FEEDBACK_BYTES =
+4096`) bounds the count/length/total-size of every returned error list
+before it's persisted (`ImpactAnalysis.validationErrors`), fed back as
+retry guidance, or surfaced in an eval report. A new pre-validation
+`MAX_PROVIDER_OUTPUT_BYTES = 65,536` guard in `validateProviderOutput()`
+rejects an oversized or circular/unserializable raw response before Zod
+ever touches it — never throwing, never including the raw output in its
+error. See `docs/DECISIONS.md`, "Phase 6 correction: provider-spend and
+output-bounds", and `docs/THREAT_MODEL.md` for the updated
+denial-of-wallet/denial-of-service residual-risk assessment.
 
 **Prompt-injection defenses.** Unchanged in design from Phase 4 (data
 isolation + fixed system instructions + bounded projection + strict
@@ -628,18 +712,27 @@ enforcement); `evals/runner.ts` aggregates per-scenario and per-metric
 results, `evals/reporters.ts` prints a console summary and writes
 machine-readable JSON to the gitignored `evals/.output/`.
 
-`npm run eval:live` (`evals/run-live.ts`) fails closed unless `AI_MODE=live`
-
-- `RUN_LIVE_EVALS=true` + a real `OPENAI_API_KEY` are all set (exact-value
-  checks, never truthy checks). It calls `createProviderFromEnv()` →
-  `provider.generateImpactAnalysis()` directly — never `runImpactAnalysis()`
-  — so it never touches Prisma or any database, and never creates a
-  `Decision`/`ProposedChange` row. Capped at 6 calls (one per fixture, the
-  five non-adversarial scenarios' fixtures plus the adversarial-notes
-  prompt-injection fixture), no retry beyond one attempt per fixture, every
-  response validated through the same `validateProviderOutput()`. **Not
-  executed during Phase 6** — Phase 8 owns the one authorized, sanitized live
-  run and `docs/EVAL_RESULTS.md`, per `docs/SPEC.md` §13.
+`npm run eval:live` (`evals/run-live.ts`) fails closed unless `AI_MODE=live`,
+`RUN_LIVE_EVALS=true`, and a real `OPENAI_API_KEY` are all set (exact-value
+checks, never truthy checks, verified before `createProviderFromEnv()` is
+ever called). It calls `createProviderFromEnv()` →
+`provider.generateImpactAnalysis()` directly — never `runImpactAnalysis()`
+— so it never touches Prisma or any database, and never creates a
+`Decision`/`ProposedChange` row. **At most six real HTTP requests per
+invocation**: exactly six fictional fixtures (the five non-adversarial
+scenarios' fixtures plus the adversarial-notes prompt-injection fixture),
+one `for`-loop iteration per fixture with no retry/while construct around
+the provider call, and the provider itself (`OpenAiImpactAnalysisProvider`,
+same class production analyses use) makes exactly one `responses.create()`
+call per `generateImpactAnalysis()` invocation with SDK-level retries
+disabled (`OPENAI_SDK_MAX_RETRIES = 0`) — three independently-verified
+facts (`packages/core/src/ai/openai-provider.test.ts`,
+`packages/core/src/security/live-eval-call-cap.test.ts`) that together
+make "6 fixtures" and "at most 6 HTTP requests" the same number, not a
+hopeful approximation. Every response is still validated through the same
+`validateProviderOutput()`. **Not executed during Phase 6** — Phase 8 owns
+the one authorized, sanitized live run and `docs/EVAL_RESULTS.md`, per
+`docs/SPEC.md` §13.
 
 Mock evals demonstrate pipeline and policy behavior, not general live-model
 quality — see `evals/README.md`'s "What these prove (and don't)".

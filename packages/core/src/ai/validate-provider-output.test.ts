@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { ModelInputProjection } from "./model-input";
 import { generateMockImpactAnalysis } from "./mock-provider";
-import { validateProviderOutput } from "./validate-provider-output";
+import {
+  MAX_PROVIDER_OUTPUT_BYTES,
+  MAX_VALIDATION_ERROR_COUNT,
+  MAX_VALIDATION_ERROR_LENGTH,
+  MAX_VALIDATION_FEEDBACK_BYTES,
+  sanitizeProviderValidationErrors,
+  validateProviderOutput,
+} from "./validate-provider-output";
 
 // A small, self-contained, schema-valid ModelInputProjection — this file
 // tests validateProviderOutput() in isolation, so it deliberately never
@@ -81,14 +88,17 @@ describe("validateProviderOutput", () => {
     expect(result.category).toBe("INVALID_OUTPUT_SCHEMA");
   });
 
-  it("[invalid source ID named in errors] a fabricated source ID is rejected and named in the returned errors", () => {
+  it("[invalid source ID identified by path, never echoed] a fabricated source ID is rejected, identified by array index, and never appears in the returned errors", () => {
     const base = generateMockImpactAnalysis(MODEL_INPUT);
     const rawOutput = { ...base, sourceRecordIds: ["FAKE-RECORD-999"] };
     const result = validateProviderOutput(rawOutput, MODEL_INPUT);
     expect(result.valid).toBe(false);
     if (result.valid) return;
     expect(result.category).toBe("SEMANTIC_VALIDATION_FAILED");
-    expect(result.errors.some((e) => e.includes("FAKE-RECORD-999"))).toBe(true);
+    expect(result.errors).toContain(
+      "sourceRecordIds[0] is not in the supplied evidence allowlist.",
+    );
+    expect(result.errors.some((e) => e.includes("FAKE-RECORD-999"))).toBe(false);
   });
 
   it("[wrong record type rejected] a milestone ID placed in affectedRequirementIds is rejected", () => {
@@ -118,6 +128,45 @@ describe("validateProviderOutput", () => {
     expect(result.category).toBe("SEMANTIC_VALIDATION_FAILED");
   });
 
+  it("[oversized total output rejected] a response over MAX_PROVIDER_OUTPUT_BYTES is rejected before structural validation, with a fixed safe message", () => {
+    const base = generateMockImpactAnalysis(MODEL_INPUT);
+    // A single field padded well past the byte ceiling — still otherwise
+    // shaped like a plausible response, so this exercises the size guard
+    // specifically, not just "not an object."
+    const rawOutput = { ...base, executiveSummary: "x".repeat(MAX_PROVIDER_OUTPUT_BYTES + 1) };
+    const result = validateProviderOutput(rawOutput, MODEL_INPUT);
+    expect(result.valid).toBe(false);
+    if (result.valid) return;
+    expect(result.category).toBe("INVALID_OUTPUT_SCHEMA");
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).not.toContain("x".repeat(100));
+  });
+
+  it("[circular object never throws] a raw output containing a circular reference returns a safe invalid result instead of throwing", () => {
+    const circular: Record<string, unknown> = { executiveSummary: "test" };
+    circular.self = circular;
+    expect(() => validateProviderOutput(circular, MODEL_INPUT)).not.toThrow();
+    const result = validateProviderOutput(circular, MODEL_INPUT);
+    expect(result.valid).toBe(false);
+    if (result.valid) return;
+    expect(result.category).toBe("INVALID_OUTPUT_SCHEMA");
+  });
+
+  it("[giant fabricated ID never appears in validation errors] an extremely long fabricated source ID is rejected without being echoed back", () => {
+    const base = generateMockImpactAnalysis(MODEL_INPUT);
+    const giantCanary = "GIANT-CANARY-" + "A".repeat(5000);
+    const rawOutput = { ...base, sourceRecordIds: [giantCanary] };
+    const result = validateProviderOutput(rawOutput, MODEL_INPUT);
+    expect(result.valid).toBe(false);
+    if (result.valid) return;
+    // Rejected structurally (exceeds maxRecordIdLength) before semantic
+    // validation ever runs — either way, the canary must never appear.
+    for (const error of result.errors) {
+      expect(error).not.toContain(giantCanary);
+      expect(error).not.toContain("GIANT-CANARY");
+    }
+  });
+
   it("[pure] never mutates its inputs", () => {
     const rawOutput = generateMockImpactAnalysis(MODEL_INPUT);
     const rawOutputCopy = JSON.parse(JSON.stringify(rawOutput));
@@ -125,5 +174,51 @@ describe("validateProviderOutput", () => {
     validateProviderOutput(rawOutput, MODEL_INPUT);
     expect(rawOutput).toEqual(rawOutputCopy);
     expect(MODEL_INPUT).toEqual(modelInputCopy);
+  });
+
+  it("[valid mock output for every scenario shape still passes] a minimal, a maximal-evidence, and a null-exposure model input all still validate", () => {
+    const minimal: ModelInputProjection = {
+      ...MODEL_INPUT,
+      evidenceAllowlist: [MODEL_INPUT.evidenceAllowlist[0]!],
+      deterministicResults: {
+        ...MODEL_INPUT.deterministicResults,
+        affectedRequirementIds: [],
+        affectedMilestones: [],
+        scheduleExposureDays: null,
+        budgetExposureAmount: null,
+      },
+    };
+    const rawOutput = generateMockImpactAnalysis(minimal);
+    const result = validateProviderOutput(rawOutput, minimal);
+    expect(result.valid).toBe(true);
+  });
+});
+
+describe("sanitizeProviderValidationErrors", () => {
+  it("[count cap] more than MAX_VALIDATION_ERROR_COUNT errors are truncated to exactly that many", () => {
+    const errors = Array.from({ length: MAX_VALIDATION_ERROR_COUNT + 50 }, (_, i) => `error ${i}`);
+    const sanitized = sanitizeProviderValidationErrors(errors);
+    expect(sanitized.length).toBeLessThanOrEqual(MAX_VALIDATION_ERROR_COUNT);
+  });
+
+  it("[per-error length cap] a single oversized error is truncated to MAX_VALIDATION_ERROR_LENGTH", () => {
+    const sanitized = sanitizeProviderValidationErrors(["x".repeat(10_000)]);
+    expect(sanitized[0]?.length).toBeLessThanOrEqual(MAX_VALIDATION_ERROR_LENGTH);
+  });
+
+  it("[total byte cap] many moderately-sized errors are cut off once MAX_VALIDATION_FEEDBACK_BYTES would be exceeded", () => {
+    const errors = Array.from({ length: MAX_VALIDATION_ERROR_COUNT }, () => "x".repeat(300));
+    const sanitized = sanitizeProviderValidationErrors(errors);
+    const totalBytes = sanitized.reduce((sum, e) => sum + Buffer.byteLength(e, "utf8"), 0);
+    expect(totalBytes).toBeLessThanOrEqual(MAX_VALIDATION_FEEDBACK_BYTES);
+  });
+
+  it("[small, safe input passes through unchanged]", () => {
+    const errors = ["sourceRecordIds[0] is not in the supplied evidence allowlist."];
+    expect(sanitizeProviderValidationErrors(errors)).toEqual(errors);
+  });
+
+  it("[empty input] returns an empty array", () => {
+    expect(sanitizeProviderValidationErrors([])).toEqual([]);
   });
 });

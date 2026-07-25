@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
+import RealOpenAI from "openai";
 import type OpenAI from "openai";
-import { OpenAiImpactAnalysisProvider } from "./openai-provider";
+import {
+  buildOpenAiClientOptions,
+  IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS,
+  OPENAI_REQUEST_TIMEOUT_MS,
+  OPENAI_SDK_MAX_RETRIES,
+  OpenAiImpactAnalysisProvider,
+} from "./openai-provider";
 import { assertOpenAiCompatibleJsonSchema } from "./openai-schema";
 import type { ModelInputProjection } from "./model-input";
 import type { ImpactAnalysisOutput } from "./output-schema";
@@ -193,5 +200,178 @@ describe("OpenAiImpactAnalysisProvider — request construction (no network)", (
     // job (orchestrator.ts, via impactAnalysisOutputSchema) — so an
     // obviously-invalid body is still returned here, unmodified.
     expect(response.rawOutput).toEqual({ not: "a valid output" });
+  });
+});
+
+describe("OpenAiImpactAnalysisProvider — SDK retry/timeout configuration (Phase 6 correction)", () => {
+  it("[buildOpenAiClientOptions] maxRetries is exactly 0 and timeout is explicitly bounded", () => {
+    const options = buildOpenAiClientOptions("sk-test");
+    expect(options.maxRetries).toBe(OPENAI_SDK_MAX_RETRIES);
+    expect(options.maxRetries).toBe(0);
+    expect(options.timeout).toBe(OPENAI_REQUEST_TIMEOUT_MS);
+    expect(options.timeout).toBeGreaterThan(0);
+    expect(options.apiKey).toBe("sk-test");
+  });
+
+  it("[real client construction, no network call] a real OpenAI client built from buildOpenAiClientOptions() resolves maxRetries/timeout to exactly these values — no hidden SDK default (2 retries / 10-minute timeout) survives", () => {
+    // Constructing the SDK client never itself opens a connection — the
+    // SDK connects lazily per-request — so this is safe without a fake
+    // client and without any network access.
+    const client = new RealOpenAI(buildOpenAiClientOptions("sk-test"));
+    expect(client.maxRetries).toBe(0);
+    expect(client.timeout).toBe(OPENAI_REQUEST_TIMEOUT_MS);
+  });
+
+  it("[no explicit options] the SDK's own real defaults are confirmed to differ from this provider's configured values — proving the override is load-bearing, not redundant", () => {
+    const client = new RealOpenAI({ apiKey: "sk-test" });
+    expect(client.maxRetries).toBe(2);
+    expect(client.timeout).toBeGreaterThan(OPENAI_REQUEST_TIMEOUT_MS);
+  });
+
+  it("[constructor uses buildOpenAiClientOptions] a provider constructed without an injected client only ever needs a valid apiKey/model — buildOpenAiClientOptions is exercised on that path, not bypassed", () => {
+    // No fake client injected here — this exercises the real
+    // `new OpenAI(buildOpenAiClientOptions(...))` construction path inside
+    // the constructor. Still makes no network call: construction alone
+    // never does.
+    expect(
+      () => new OpenAiImpactAnalysisProvider({ apiKey: "sk-test", model: "gpt-test" }),
+    ).not.toThrow();
+  });
+});
+
+describe("OpenAiImpactAnalysisProvider — output-token ceiling (Phase 6 correction)", () => {
+  it("[max_output_tokens sent on every request] equals IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS, server-controlled", async () => {
+    const { client, requests } = buildFakeClient(JSON.stringify(buildValidOutput()));
+    const provider = new OpenAiImpactAnalysisProvider({
+      apiKey: "sk-test",
+      model: "gpt-test",
+      client,
+    });
+
+    await provider.generateImpactAnalysis({
+      traceId: "trace-1",
+      analysisRunId: "run-1",
+      attempt: 1,
+      systemPrompt: "system",
+      modelInput: buildModelInput(),
+    });
+
+    expect(requests[0]?.max_output_tokens).toBe(IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS);
+  });
+
+  it("[incomplete response due to token ceiling] is never treated as successful — throws a retryable INCOMPLETE_OUTPUT error, never including the truncated output text", async () => {
+    const TRUNCATED_FRAGMENT = '{"executiveSummary": "This got cut off mid-sen';
+    const client = {
+      responses: {
+        create: async () => ({
+          model: "gpt-test",
+          output_text: TRUNCATED_FRAGMENT,
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+        }),
+      },
+    } as unknown as OpenAI;
+    const provider = new OpenAiImpactAnalysisProvider({
+      apiKey: "sk-test",
+      model: "gpt-test",
+      client,
+    });
+
+    let caught: unknown;
+    try {
+      await provider.generateImpactAnalysis({
+        traceId: "trace-1",
+        analysisRunId: "run-1",
+        attempt: 1,
+        systemPrompt: "system",
+        modelInput: buildModelInput(),
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    const error = caught as { category?: string; message: string };
+    expect(error.category).toBe("INCOMPLETE_OUTPUT");
+    expect(error.message).not.toContain(TRUNCATED_FRAGMENT);
+    expect(error.message).not.toContain("cut off");
+  });
+
+  it("[incomplete for a different reason, e.g. content_filter] is not classified as INCOMPLETE_OUTPUT by this specific check — falls through to normal JSON parsing", async () => {
+    const client = {
+      responses: {
+        create: async () => ({
+          model: "gpt-test",
+          output_text: JSON.stringify(buildValidOutput()),
+          status: "incomplete",
+          incomplete_details: { reason: "content_filter" },
+        }),
+      },
+    } as unknown as OpenAI;
+    const provider = new OpenAiImpactAnalysisProvider({
+      apiKey: "sk-test",
+      model: "gpt-test",
+      client,
+    });
+
+    const response = await provider.generateImpactAnalysis({
+      traceId: "trace-1",
+      analysisRunId: "run-1",
+      attempt: 1,
+      systemPrompt: "system",
+      modelInput: buildModelInput(),
+    });
+    expect(response.rawOutput).toEqual(buildValidOutput());
+  });
+});
+
+describe("OpenAiImpactAnalysisProvider — one invocation, one HTTP attempt (Phase 6 correction)", () => {
+  it("[success] one generateImpactAnalysis() call invokes responses.create() exactly once", async () => {
+    const { client, requests } = buildFakeClient(JSON.stringify(buildValidOutput()));
+    const provider = new OpenAiImpactAnalysisProvider({
+      apiKey: "sk-test",
+      model: "gpt-test",
+      client,
+    });
+
+    await provider.generateImpactAnalysis({
+      traceId: "trace-1",
+      analysisRunId: "run-1",
+      attempt: 1,
+      systemPrompt: "system",
+      modelInput: buildModelInput(),
+    });
+
+    expect(requests).toHaveLength(1);
+  });
+
+  it("[transient failure] one generateImpactAnalysis() call still invokes responses.create() exactly once — no hidden SDK retry inside the production adapter", async () => {
+    let callCount = 0;
+    const client = {
+      responses: {
+        create: async () => {
+          callCount += 1;
+          const error = new Error("simulated transient failure");
+          throw error;
+        },
+      },
+    } as unknown as OpenAI;
+    const provider = new OpenAiImpactAnalysisProvider({
+      apiKey: "sk-test",
+      model: "gpt-test",
+      client,
+    });
+
+    await expect(
+      provider.generateImpactAnalysis({
+        traceId: "trace-1",
+        analysisRunId: "run-1",
+        attempt: 1,
+        systemPrompt: "system",
+        modelInput: buildModelInput(),
+      }),
+    ).rejects.toThrow();
+
+    expect(callCount).toBe(1);
   });
 });

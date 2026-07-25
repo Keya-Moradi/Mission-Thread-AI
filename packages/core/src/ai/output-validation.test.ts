@@ -80,20 +80,27 @@ describe("validateImpactAnalysisSemantics — valid input", () => {
 });
 
 describe("validateImpactAnalysisSemantics — source-ID allowlisting", () => {
-  it("[fabricated top-level source ID] rejects an ID not in the evidence allowlist", () => {
+  it("[fabricated top-level source ID] rejects an ID not in the evidence allowlist, identified by index, and never echoes the fabricated value", () => {
     const result = validateImpactAnalysisSemantics(
       buildOutput({ sourceRecordIds: ["EVT-001", "REQ-FABRICATED"] }),
       buildModelInput(),
     );
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes("REQ-FABRICATED"))).toBe(true);
+    expect(result.errors).toContain(
+      "sourceRecordIds[1] is not in the supplied evidence allowlist.",
+    );
+    expect(result.errors.some((e) => e.includes("REQ-FABRICATED"))).toBe(false);
   });
 
-  it("[fabricated per-option source ID] rejects an ID not in the evidence allowlist", () => {
+  it("[fabricated per-option source ID] rejects an ID not in the evidence allowlist, identified by index, and never echoes the fabricated value or the option's title", () => {
     const result = validateImpactAnalysisSemantics(
       buildOutput({
         mitigationOptions: [
-          buildOption({ isRecommended: true, sourceRecordIds: ["MS-FABRICATED"] }),
+          buildOption({
+            isRecommended: true,
+            title: "Secret Option Title",
+            sourceRecordIds: ["MS-FABRICATED"],
+          }),
           buildOption(),
           buildOption(),
         ],
@@ -101,7 +108,11 @@ describe("validateImpactAnalysisSemantics — source-ID allowlisting", () => {
       buildModelInput(),
     );
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes("MS-FABRICATED"))).toBe(true);
+    expect(result.errors).toContain(
+      "mitigationOptions[0].sourceRecordIds[0] is not in the supplied evidence allowlist.",
+    );
+    expect(result.errors.some((e) => e.includes("MS-FABRICATED"))).toBe(false);
+    expect(result.errors.some((e) => e.includes("Secret Option Title"))).toBe(false);
   });
 
   it("[valid citations] a citation that matches a real allowlisted ID is accepted", () => {

@@ -439,6 +439,101 @@ entries and `docs/THREAT_MODEL.md`.
       100% fictional/synthetic; no Phase 7 (React Flow/MCP) or Phase 8
       (delivery/live-eval) functionality was added.
 
+## Phase 6 correction pass — provider-spend and output-bounds — done (2026-07-24)
+
+Four confirmed defects fixed as one security-boundary correction: OpenAI
+SDK retries/timeout left enabled (undermining the orchestrator's own
+retry cap), no output-token ceiling on the live request, several output
+strings with no maximum length, and semantic-validation errors echoing
+untrusted provider-controlled values. Full disposition is in
+`docs/DECISIONS.md`'s "(Phase 6 correction pass)" entry.
+
+- [x] **Sole retry authority:** `buildOpenAiClientOptions()`
+      (`packages/core/src/ai/openai-provider.ts`) — `OPENAI_SDK_MAX_RETRIES = 0`,
+      `OPENAI_REQUEST_TIMEOUT_MS = 60_000` — used at the one place a real
+      `OpenAI` client is constructed. One provider invocation now always
+      equals exactly one HTTP request; a timeout still classifies through
+      the existing transient-provider-failure path and gets the
+      orchestrator's one retry, same as before.
+- [x] **Output-token ceiling:** `IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS = 8192`
+      sent as `max_output_tokens` on every live request (server-controlled,
+      applies to production and `eval:live` alike). A response truncated
+      at that ceiling is never treated as successful — new retryable
+      `INCOMPLETE_OUTPUT` category, never includes the truncated text.
+- [x] **Complete per-string output bounds:** new `OUTPUT_LIMITS` entries
+      (`maxRecordIdLength`, `maxVerificationCategoryLength`,
+      `maxAssumptionLength`, `maxUnknownLength`); one shared
+      `outputRecordIdSchema` bounds every record-ID field. Researched (not
+      assumed) that OpenAI Structured Outputs' strict mode doesn't support
+      `minLength`/`maxLength` — stripped from the provider-facing generated
+      schema only; the authoritative Zod runtime checks are unaffected.
+- [x] **Total provider-output byte ceiling:** `MAX_PROVIDER_OUTPUT_BYTES = 65,536`,
+      a pre-validation guard in `validateProviderOutput()` — rejects an
+      oversized or circular/unserializable response before Zod ever runs,
+      shared automatically by orchestration and `evals/`.
+- [x] **Redacted semantic-validation errors:** every message in
+      `output-validation.ts` now names only a field path/array index —
+      never the invalid ID, an option title, or any other
+      provider-controlled value — since these strings are both persisted
+      and fed back to the provider as retry guidance.
+- [x] **Bounded validation feedback:** new
+      `sanitizeProviderValidationErrors()` caps error count (20), each
+      message's length (240 chars), and total serialized size (4096
+      bytes) — applied uniformly inside `validateProviderOutput()`, so
+      persistence, retry feedback, and eval reporting all inherit it.
+- [x] Tests: 36 new/modified across `openai-provider.test.ts`,
+      `output-schema.test.ts`, `openai-schema.test.ts`,
+      `validate-provider-output.test.ts`, `output-validation.test.ts`
+      (2 fabricated-ID assertions corrected to match the redaction fix,
+      strictly strengthened — now assert both the safe message's presence
+      and the unsafe value's absence), a new
+      `orchestrator-provider-spend.test.ts` (real
+      `OpenAiImpactAnalysisProvider` + fake client through the real
+      orchestrator: 2-call cap on repeated transient failure; a giant
+      canary value in a rejected first attempt never reaches the retry
+      request, persisted `validationErrors`, or logs), and a new
+      `packages/core/src/security/live-eval-call-cap.test.ts` (static
+      source scan of `evals/run-live.ts`: exactly 6 fixtures, no
+      retry/while construct, opt-in check precedes provider construction,
+      exact-value environment comparisons). 656 core (620 → 656) + 36 web
+      = 692 total; all 8 `eval:mock` scenarios and all 12 tagged metrics
+      still pass (only the `invalid-source-id` scenario's assertion text
+      changed to match the redaction, not its pass/fail outcome).
+- [x] Live-eval call cap re-verified and documented precisely: 6 fixtures →
+      at most 6 real HTTP requests (not just 6 intended calls) — proven by
+      the no-retry-construct source scan plus the provider's own
+      one-call-per-invocation/zero-SDK-retry guarantees. `eval:live` still
+      not executed.
+- [x] Docs: `docs/DECISIONS.md` (1 new "(Phase 6 correction pass)" entry),
+      `docs/ARCHITECTURE.md` (new "Provider-spend and output-bounds"
+      subsection, updated AI/Orchestration/Evaluations sections),
+      `docs/THREAT_MODEL.md` (Denial-of-wallet, Denial-of-service,
+      Hallucinated facts and IDs, and Prompt injection sections updated
+      with the confirmed-defect/fix/verification detail), `README.md`
+      (Mock vs. live AI section rewritten, Limitations updated including
+      the corrected `next-auth` `5.0.0-beta.32` reference — package.json
+      already used beta.32; only the stale doc sentence needed fixing),
+      `evals/README.md` (live-eval section rewritten with the precise
+      call-cap proof), this file.
+- [x] Quality gate: `node -v`, `npm ci`-equivalent state, `db:validate`,
+      `db:generate`, `lint`, `format:check`, `typecheck` (all workspaces +
+      `evals/`), `test` (692), `build`, `smoke:test` (82/82), `eval:mock`
+      (8/8, 12/12 metrics) all passing before any destructive operation.
+      `npm audit --json` reviewed and classified, not reported clean: 16
+      findings now (up from 7 — a newly-surfaced `eslint`-toolchain
+      devDependency chain, lint-time-only, no reachable production
+      surface, deferred as a major-version-only fix, consistent with this
+      pass's narrow scope; the previously-deferred `@prisma/dev`/`next`
+      chains unchanged). Fresh `AskUserQuestion` authorization obtained for
+      `db:reset:test` — a new third-party Prisma CLI AI-agent consent
+      guardrail was encountered again and honored (the same mechanism from
+      the original Phase 6 pass), not bypassed. `db:reset:test` then
+      `test:e2e` (1/1), then `test:e2e` again with no further reset (1/1),
+      confirming repeatability. `eval:live` was not run. Confirmed
+      throughout: no real OpenAI request was made at any point in this
+      pass; CI still `AI_MODE=mock`; the rate limiter was not redesigned;
+      Phases 1–5 were not reopened; no Phase 7 functionality was added.
+
 ## Phase 7 — Graph and MCP (not started)
 
 ## Phase 8 — Delivery (not started)

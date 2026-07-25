@@ -513,24 +513,56 @@ false`, no streaming/tools/web search/file search/conversations.
   smoke check, or CI step ever exercises this path — see
   `packages/core/src/ai/openai-provider.ts`.
 
-Every attempt's output — from either provider — is re-validated twice
-before anything is persisted: structurally against the authoritative Zod
-output schema (which also enforces database-safe bounds — monetary values
-fit PostgreSQL `Decimal(12,2)`'s 10-integer-digit capacity, a mitigation
-option's proposed schedule impact is bounded to ±3650 days — so a
+**The orchestrator is the sole retry authority.** The OpenAI SDK's own
+automatic retry behavior (2 retries by default) and its 10-minute default
+request timeout are both explicitly disabled/bounded at client construction
+(`OPENAI_SDK_MAX_RETRIES = 0`, `OPENAI_REQUEST_TIMEOUT_MS = 60_000` —
+`packages/core/src/ai/openai-provider.ts`), so one `LLMProvider` invocation
+always equals exactly one HTTP request; the orchestration service's own
+"at most two attempts total" cap (below) is the only thing that ever
+issues a second request, and a timeout is classified and retried through
+the same transient-provider-failure path as any other transient error.
+Every live request also carries a server-controlled `max_output_tokens`
+ceiling (`IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS = 8192`, covering both visible
+output and reasoning tokens) — a response truncated by that ceiling is
+never treated as successful; it's classified as a retryable
+`INCOMPLETE_OUTPUT` failure instead. Both constants apply identically to
+production analyses and `npm run eval:live`, since both go through this
+same provider class — see `docs/DECISIONS.md`, "Phase 6 correction:
+provider-spend and output-bounds", and `docs/THREAT_MODEL.md`,
+"Denial-of-wallet."
+
+Every attempt's output — from either provider — passes a pre-validation
+total-size guard (`MAX_PROVIDER_OUTPUT_BYTES = 65,536` — rejects an
+oversized or circular/unserializable response before Zod ever walks it,
+never throwing and never including the raw output in its error) and is
+then re-validated twice before anything is persisted: structurally against
+the authoritative Zod output schema (which also enforces database-safe
+bounds — monetary values fit PostgreSQL `Decimal(12,2)`'s 10-integer-digit
+capacity, a mitigation option's proposed schedule impact is bounded to
+±3650 days, and every output string — record IDs, verification categories,
+assumptions, unknowns — now has an explicit maximum length, so a
 structurally "valid" response can never fail at the actual write), then
 semantically against the request's own model input (every cited source ID
 must exist in the supplied evidence allowlist; the reported schedule/budget
-exposure must exactly equal the deterministic value already computed). On
-a retryable failure (malformed JSON, schema violation, invalid citation,
-deterministic mismatch, transient provider error), the orchestration
-service retries exactly once with concise validation feedback; a
-configuration failure (missing key/model) is never retried. A **persistence**
-failure — the provider responded correctly, but writing the result to the
-database failed — is a separate, non-retryable category
-(`PERSISTENCE_FAILURE`): the provider is never called a second time to
-compensate for an application-side write failure. See `docs/SPEC.md` §9–10
-and `docs/ARCHITECTURE.md`.
+exposure must exactly equal the deterministic value already computed).
+Every validation-failure message describes a field path or array index
+only (e.g. `"sourceRecordIds[2] is not in the supplied evidence
+allowlist."`) — it never echoes back the invalid ID, an option title, or
+any other provider-controlled value, since these messages are both
+persisted (`ImpactAnalysis.validationErrors`) and fed back to the provider
+as retry guidance; a shared sanitizer additionally caps the number of
+errors, each error's length, and the total feedback size before either use
+(`packages/core/src/ai/validate-provider-output.ts`). On a retryable
+failure (malformed JSON, schema violation, invalid citation, deterministic
+mismatch, incomplete/truncated output, transient provider error), the
+orchestration service retries exactly once with concise, redacted
+validation feedback; a configuration failure (missing key/model) is never
+retried. A **persistence** failure — the provider responded correctly, but
+writing the result to the database failed — is a separate, non-retryable
+category (`PERSISTENCE_FAILURE`): the provider is never called a second
+time to compensate for an application-side write failure. See
+`docs/SPEC.md` §9–10 and `docs/ARCHITECTURE.md`.
 
 ## Limitations
 
@@ -570,7 +602,7 @@ and `docs/ARCHITECTURE.md`.
   `BudgetExposureResult.totalDeterministicExposure` specifically — see
   `docs/DECISIONS.md`. A future Phase 2 field rename would need this
   mapping updated in lockstep; nothing enforces that automatically today.
-- **`next-auth` is on the v5 beta channel** (`5.0.0-beta.31`) — it's the
+- **`next-auth` is on the v5 beta channel** (`5.0.0-beta.32`) — it's the
   version Auth.js's own docs currently recommend for the App Router, but
   it is pre-1.0 and could introduce breaking changes on upgrade.
 - **The in-memory analysis rate limiter is process-local** — a process
@@ -579,6 +611,12 @@ and `docs/ARCHITECTURE.md`.
   independent limit rather than a shared one. Not suitable for that
   deployment shape without adding a shared store (Redis, or a
   database-backed limiter); accepted for this MVP per `docs/SPEC.md` §12.
+  Per-actor request throttling is only one half of the denial-of-wallet
+  story — the other half, the per-request cost ceiling, is bounded
+  independently by the OpenAI SDK's disabled retries
+  (`OPENAI_SDK_MAX_RETRIES = 0`), the orchestrator's own 2-attempt cap, and
+  `IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS`, so worst-case spend per actor per
+  window is now a small, fixed, documented number rather than open-ended.
   See `docs/THREAT_MODEL.md`, "Denial-of-wallet."
 - **Audit append-only-ness is enforced at the application layer only** — no
   update/delete route exists anywhere for `AuditEvent`, but this is not
@@ -592,18 +630,24 @@ and `docs/ARCHITECTURE.md`.
   deterministic/structural/semantic rules hold, not that a real model
   produces good narrative output; that's `eval:live`'s job, which has not
   been run in this repository yet. See `evals/README.md`.
-- **Remaining npm audit findings** — `@prisma/dev`'s own transitive
-  `find-my-way`/`valibot` chain (optional `prisma dev` local-tooling
-  dependency, never invoked anywhere in this repository) and Next.js's
-  internally bundled `postcss`/`sharp` copies (unreachable through any
-  code path this app exercises — no attacker-controlled CSS is ever
-  processed, and `next/image` is never imported). The only available
-  "fixes" for these require either an upstream patch not yet released or a
-  multi-major-version downgrade of Next.js, which would be a worse trade
-  than the advisories themselves. See `docs/DECISIONS.md`, "Phase 6:
-  Dependency-security review and applied fixes," for the complete
-  disposition of every finding, including the ones already resolved this
-  phase (`next`, `next-auth`, and part of the `prisma` chain).
+- **Remaining npm audit findings** — as of this correction pass, `npm audit`
+  reports 16 findings (1 moderate, 15 high): the previously-documented
+  `@prisma/dev` transitive `find-my-way`/`valibot` chain (optional
+  `prisma dev` local-tooling dependency, never invoked anywhere in this
+  repository) and Next.js's internally bundled `postcss`/`sharp` copies
+  (unreachable — no attacker-controlled CSS is ever processed, and
+  `next/image` is never imported), plus a newly-surfaced `eslint`/
+  `eslint-config-next`/`brace-expansion`/`minimatch` toolchain advisory
+  chain — a lint-time-only devDependency, never part of the running
+  application, whose only available fix is a major-version bump to
+  `eslint@10`/`eslint-config-next@0.2.4`. None of these have a compatible
+  non-breaking fix available; the alternative in every case is either an
+  upstream patch not yet released or a breaking major-version migration,
+  which would be a worse trade than the advisories themselves. See
+  `docs/DECISIONS.md`, "Phase 6 correction: dependency-advisory disposition
+  update," for the complete, current disposition of every finding,
+  including the ones already resolved in the original Phase 6 pass
+  (`next`, `next-auth`, and part of the `prisma` chain).
 - No production cloud infrastructure, Kubernetes, queues, or public signup
   — intentionally out of scope for this MVP (`docs/SPEC.md` §3).
 

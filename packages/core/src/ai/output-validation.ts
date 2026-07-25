@@ -34,49 +34,50 @@ export function validateImpactAnalysisSemantics(
   );
 
   // (a) every sourceRecordIds entry — top-level and per-option — must exist
-  // in the evidence allowlist this request actually supplied.
-  for (const id of output.sourceRecordIds) {
+  // in the evidence allowlist this request actually supplied. Messages
+  // below describe the field path/index only — never the invalid ID or
+  // any other provider-controlled value (option title, etc.) — since these
+  // errors are persisted (ImpactAnalysis.validationErrors) and fed back to
+  // the provider as retry guidance; echoing an attacker-controlled value
+  // back into either would let a malicious/compromised provider inject
+  // arbitrary text into both. See docs/DECISIONS.md, "Phase 6 correction:
+  // provider-spend and output-bounds" / docs/THREAT_MODEL.md.
+  output.sourceRecordIds.forEach((id, index) => {
     if (!allowlistIds.has(id)) {
-      errors.push(
-        `sourceRecordIds cites "${id}", which is not in the supplied evidence allowlist.`,
-      );
+      errors.push(`sourceRecordIds[${index}] is not in the supplied evidence allowlist.`);
     }
-  }
-  for (const option of output.mitigationOptions) {
-    for (const id of option.sourceRecordIds) {
+  });
+  output.mitigationOptions.forEach((option, optionIndex) => {
+    option.sourceRecordIds.forEach((id, idIndex) => {
       if (!allowlistIds.has(id)) {
         errors.push(
-          `Mitigation option "${option.title}" cites "${id}", which is not in the supplied evidence allowlist.`,
+          `mitigationOptions[${optionIndex}].sourceRecordIds[${idIndex}] is not in the supplied evidence allowlist.`,
         );
       }
-    }
-  }
+    });
+  });
 
   // (b) affected requirement/milestone IDs must exist as evidence of the
   // matching record type — a milestone ID in affectedRequirementIds (or vice
   // versa) is rejected even if that ID exists somewhere in the allowlist
   // under the other type.
-  for (const id of output.affectedRequirementIds) {
+  output.affectedRequirementIds.forEach((id, index) => {
     if (!requirementIdsInAllowlist.has(id)) {
       errors.push(
-        `affectedRequirementIds includes "${id}", which is not a REQUIREMENT in the evidence allowlist.`,
+        `affectedRequirementIds[${index}] is not a REQUIREMENT in the evidence allowlist.`,
       );
     }
-  }
-  for (const id of output.affectedMilestoneIds) {
+  });
+  output.affectedMilestoneIds.forEach((id, index) => {
     if (!milestoneIdsInAllowlist.has(id)) {
-      errors.push(
-        `affectedMilestoneIds includes "${id}", which is not a MILESTONE in the evidence allowlist.`,
-      );
+      errors.push(`affectedMilestoneIds[${index}] is not a MILESTONE in the evidence allowlist.`);
     }
-  }
-  for (const gap of output.verificationGaps) {
+  });
+  output.verificationGaps.forEach((gap, index) => {
     if (!requirementIdsInAllowlist.has(gap.requirementId)) {
-      errors.push(
-        `verificationGaps references requirement "${gap.requirementId}", which is not a REQUIREMENT in the evidence allowlist.`,
-      );
+      errors.push(`verificationGaps[${index}].requirementId is not allowlisted as a REQUIREMENT.`);
     }
-  }
+  });
 
   // (c) deterministic equality — the model may never report a schedule or
   // budget exposure number that disagrees with the deterministic value
@@ -86,16 +87,16 @@ export function validateImpactAnalysisSemantics(
   // docs/DECISIONS.md, "Phase 4 deterministic equality mapping", for why
   // these specific fields (not currentVarianceTotal or storedDelayDays)
   // were chosen. The *deterministic* value is always what gets persisted,
-  // never the model's own copy of it, even when they agree.
+  // never the model's own copy of it, even when they agree. The message
+  // deliberately omits both values (the provider's claimed figure is
+  // still provider-controlled, even though it's numeric/short) — the field
+  // name alone is enough for a human reviewing validationErrors to look up
+  // both figures directly from the persisted deterministic data.
   if (output.scheduleExposureDays !== modelInput.deterministicResults.scheduleExposureDays) {
-    errors.push(
-      `scheduleExposureDays (${output.scheduleExposureDays}) does not match the deterministic value (${modelInput.deterministicResults.scheduleExposureDays}).`,
-    );
+    errors.push("scheduleExposureDays does not match the deterministic value.");
   }
   if (output.budgetExposureAmount !== modelInput.deterministicResults.budgetExposureAmount) {
-    errors.push(
-      `budgetExposureAmount (${output.budgetExposureAmount}) does not match the deterministic value (${modelInput.deterministicResults.budgetExposureAmount}).`,
-    );
+    errors.push("budgetExposureAmount does not match the deterministic value.");
   }
 
   // Duplicate-ID checks — a duplicate citation would let one record
@@ -111,11 +112,11 @@ export function validateImpactAnalysisSemantics(
   if (new Set(output.affectedMilestoneIds).size !== output.affectedMilestoneIds.length) {
     errors.push("affectedMilestoneIds contains duplicate entries.");
   }
-  for (const option of output.mitigationOptions) {
+  output.mitigationOptions.forEach((option, index) => {
     if (new Set(option.sourceRecordIds).size !== option.sourceRecordIds.length) {
-      errors.push(`Mitigation option "${option.title}" has duplicate sourceRecordIds entries.`);
+      errors.push(`mitigationOptions[${index}] has duplicate sourceRecordIds entries.`);
     }
-  }
+  });
 
   return { valid: errors.length === 0, errors };
 }

@@ -183,6 +183,13 @@ method.
   canary text never appears in a serialized `ModelInputProjection` outside
   `untrustedData`, never appears in the system prompt, and that the
   system prompt itself contains zero event-specific data for any event.
+- **Phase 6 correction controls:** even a _rejected_, adversarial value
+  (e.g. a fabricated ID an injection attempt tried to smuggle in) is now
+  never echoed back into a persisted or retried error message — see
+  "Hallucinated facts and IDs" below. This closes a secondary path where
+  an injection attempt's own payload could otherwise round-trip into
+  `ImpactAnalysis.validationErrors` or the next retry's prompt, even
+  though it could never influence approval/mutation.
 - **Residual risk:** a _live_ provider (never exercised automatically) is
   not itself guaranteed to resist a sufficiently novel injection attempt —
   the defense here is architectural (the model has nothing to gain even if
@@ -295,16 +302,34 @@ method.
   never the model's own copy.
 - **Phase 6 controls:** `validateProviderOutput()` centralizes this exact
   check so the mock evaluation suite exercises the identical logic
-  (`evals/scenarios.ts` scenario 6); new tests assert a fabricated ID is
-  named in the returned validation errors (useful for a future retry
-  feedback loop, and for operator debugging).
+  (`evals/scenarios.ts` scenario 6); tests assert a fabricated ID causes
+  rejection, identified by its field path/array index.
+- **Phase 6 correction controls:** the returned validation error
+  previously named the fabricated ID (and, for a duplicate-citation error,
+  the mitigation option's own provider-generated title) directly — a
+  confirmed defect, since these errors are both persisted
+  (`ImpactAnalysis.validationErrors`) and fed back to the provider as
+  retry guidance, meaning a hallucinated or adversarial value could
+  round-trip into permanent storage and into the next prompt. Fixed:
+  every message in `output-validation.ts` now describes only a field
+  path/array index (e.g. `"sourceRecordIds[2] is not in the supplied
+evidence allowlist."`); a new `sanitizeProviderValidationErrors()`
+  additionally bounds the count/length/total size of every returned error
+  list. See "Prompt injection" below and `docs/DECISIONS.md`, "Phase 6
+  correction: provider-spend and output-bounds."
 - **Residual risk:** a hallucinated but schema-and-semantically-valid
   narrative sentence (in `executiveSummary`/`missionImpact` free text) is
   not detectable by structural or ID-based validation — a human reviewer
   remains the last line of defense for narrative accuracy, by design (see
   `docs/SPEC.md` — this system is decision support, not autonomous
   decision-making).
-- **Verification:** `npm test`, `npm run eval:mock` (scenarios 1, 6).
+- **Verification:** `npm test` (including
+  `packages/core/src/ai/output-validation.test.ts`'s and
+  `validate-provider-output.test.ts`'s explicit
+  "fabricated-value-never-appears-in-errors" assertions,
+  `orchestrator-provider-spend.test.ts`'s giant-canary-never-reaches-the-
+  retry-request-persisted-errors-or-logs test), `npm run eval:mock`
+  (scenarios 1, 6).
 
 ### Tampered evidence
 
@@ -424,15 +449,32 @@ method.
   this); zero in mock mode (no cost).
 - **Impact:** medium-high in live mode — direct, ongoing financial cost
   with no natural ceiling otherwise.
-- **Existing controls (Phase 4):** the one-retry-then-fail policy already
-  bounds a single request's worst case to at most 2 provider calls.
-- **Phase 6 controls:** the new in-memory analysis rate limiter
+- **Existing controls (Phase 4):** an orchestrator-level policy intended to
+  bound a single request to at most 2 provider attempts.
+- **Phase 6 controls:** the in-memory analysis rate limiter
   (`packages/core/src/security/analysis-rate-limiter.ts`) — see "Rate
   limiter" below for the algorithm and threshold. Limits an authenticated
   actor to `ANALYSIS_RATE_LIMIT_MAX_REQUESTS` (3) accepted analysis
-  _requests_ per `ANALYSIS_RATE_LIMIT_WINDOW_SECONDS` (60), bounding
-  worst-case provider calls per actor to 6 per minute (3 requests × at
-  most 2 attempts each).
+  _requests_ per `ANALYSIS_RATE_LIMIT_WINDOW_SECONDS` (60).
+- **Phase 6 correction controls (confirmed defect, now fixed):** the
+  Phase 4 "at most 2 provider calls" claim above was not actually
+  enforced — the official OpenAI SDK's own automatic retry behavior (2
+  retries by default) and 10-minute default timeout were both still
+  active underneath the orchestrator's own retry loop, so one orchestrator
+  "attempt" could silently become up to 3 real HTTP requests, and one
+  request could hang for up to 10 minutes rather than the orchestrator's
+  intended bound. Fixed via `buildOpenAiClientOptions()`
+  (`packages/core/src/ai/openai-provider.ts`): SDK-level retries disabled
+  (`OPENAI_SDK_MAX_RETRIES = 0`) and the timeout explicitly bounded
+  (`OPENAI_REQUEST_TIMEOUT_MS = 60_000`), making the orchestrator the sole
+  retry authority and "2 attempts" and "at most 2 real HTTP requests"
+  the same guarantee. A server-controlled `max_output_tokens`
+  (`IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS = 8192`) additionally bounds
+  per-request token spend, closing the other half of the cost equation
+  (request _count_ was bounded; response _size_ was not). Worst-case
+  provider spend per actor per window is now: 3 requests × at most 2
+  attempts each × at most 8192 output tokens per attempt, all fixed,
+  documented numbers — never open-ended.
 - **Residual risk:** **the limiter is process-local.** A horizontally
   scaled deployment (multiple application instances) would have each
   instance enforce an independent limit, multiplying the effective
@@ -442,9 +484,18 @@ method.
   database-backed limiter) instead. See `docs/SPEC.md` §12, which
   explicitly accepts this limitation for MVP.
 - **Verification:** `npm test` —
-  `packages/core/src/security/analysis-rate-limiter.test.ts` and the
+  `packages/core/src/security/analysis-rate-limiter.test.ts`, the
   orchestrator integration tests in
-  `packages/core/src/ai/orchestrator-rate-limit.test.ts`.
+  `packages/core/src/ai/orchestrator-rate-limit.test.ts`, the SDK
+  configuration tests in `packages/core/src/ai/openai-provider.test.ts`
+  (construct a real `OpenAI` client from `buildOpenAiClientOptions()` with
+  a fake API key — safe, since construction alone never opens a network
+  connection — and assert its resolved `maxRetries`/`timeout` fields
+  directly), and the provider-spend cap tests in
+  `packages/core/src/ai/orchestrator-provider-spend.test.ts` (a
+  transient/structural failure through the real `OpenAiImpactAnalysisProvider`
+  class, with a fake `responses.create`, results in exactly 2 total calls,
+  never more).
 
 ### Denial-of-service
 
@@ -455,19 +506,32 @@ method.
   every mutation requires a session.
 - **Impact:** medium.
 - **Existing controls:** `checkModelInputSize()`'s byte-length ceiling
-  before every provider call; Zod validation (with documented length
-  bounds) on every external input; Next.js's own request-size handling.
+  before every provider call (bounds what goes _into_ a request); Zod
+  validation (with documented length bounds) on every external input;
+  Next.js's own request-size handling.
 - **Phase 6 controls:** the analysis rate limiter (see "Denial-of-wallet"
   above) also bounds the rate of the single most expensive operation in
   the system (an impact analysis) per authenticated actor, which is the
   most direct DoS-relevant lever this phase adds.
+- **Phase 6 correction controls:** the request-size bound above only ever
+  covered the _outbound_ request; a provider response had no corresponding
+  ceiling on what comes _back_ — closed by `MAX_PROVIDER_OUTPUT_BYTES`
+  (65,536 bytes, `packages/core/src/ai/validate-provider-output.ts`, a
+  pre-validation guard that rejects an oversized or
+  circular/unserializable response before Zod ever walks it) and by
+  `IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS` bounding what a live provider is
+  even asked to generate in the first place (see "Denial-of-wallet"
+  above). A single hostile/malfunctioning response can no longer consume
+  unbounded memory or CPU during validation.
 - **Residual risk:** no application-wide request-rate limiting exists for
   read-only routes or other mutations (event recording, decisions,
   applies) — out of scope for Phase 6, which is scoped specifically to the
   analysis rate limiter; a real production deployment would likely add a
   reverse-proxy-level rate limit in front of the whole application.
 - **Verification:** `npm test` (model-input size-check tests, already
-  existing from Phase 4); rate-limiter tests above.
+  existing from Phase 4; the new `MAX_PROVIDER_OUTPUT_BYTES`/circular-object
+  tests in `packages/core/src/ai/validate-provider-output.test.ts`);
+  rate-limiter tests above.
 
 ### Unsafe logs
 

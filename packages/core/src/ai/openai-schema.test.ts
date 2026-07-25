@@ -146,6 +146,11 @@ describe("buildOpenAiImpactAnalysisJsonSchema — generated schema shape", () =>
     expect(scheduleNode?.minimum).toBe(MIN_MITIGATION_SCHEDULE_IMPACT_DAYS);
   });
 
+  it("[Phase 6 correction: minLength/maxLength stripped] neither keyword appears anywhere — confirmed unsupported by OpenAI Structured Outputs' strict mode, so the provider-facing schema no longer claims a length guarantee it can't enforce", () => {
+    expect(allKeys.has("minLength")).toBe(false);
+    expect(allKeys.has("maxLength")).toBe(false);
+  });
+
   it("[schedule-impact maximum] the generated schema carries the documented maximum", () => {
     const props = (schema as { properties: Record<string, unknown> }).properties;
     const mitigationOptions = props.mitigationOptions as Record<string, unknown>;

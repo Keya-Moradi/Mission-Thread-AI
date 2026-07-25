@@ -18,7 +18,26 @@ export const OUTPUT_LIMITS = {
   maxOptionDescriptionLength: 800,
   maxOptionTradeoffsLength: 500,
   maxOptionSourceRecordIds: 10,
+  // Phase 6 correction: every previously-unbounded output string gets an
+  // explicit ceiling — see docs/DECISIONS.md, "Phase 6 correction:
+  // provider-spend and output-bounds". Record IDs in this application are
+  // always short, human-readable, fixed-format strings (e.g. "REQ-001",
+  // "EVT-SUPPLIER-001") — 128 characters is generous headroom over any real
+  // ID while still rejecting a runaway/adversarial value before persistence.
+  maxRecordIdLength: 128,
+  maxVerificationCategoryLength: 64,
+  maxAssumptionLength: 500,
+  maxUnknownLength: 500,
 } as const;
+
+/**
+ * Shared bound for every output field that identifies a record by ID —
+ * affectedRequirementIds/affectedMilestoneIds/sourceRecordIds (top-level
+ * and per-option) and verificationGaps[*].requirementId. One schema so
+ * every ID field is bounded identically, rather than five independently
+ * maintained (and easily inconsistent) length checks.
+ */
+const outputRecordIdSchema = z.string().min(1).max(OUTPUT_LIMITS.maxRecordIdLength);
 
 /**
  * PostgreSQL `Decimal(12, 2)` (see `MitigationOption.costImpact` and
@@ -77,7 +96,7 @@ const mitigationOptionOutputSchema = z
       .nullable(),
     isRecommended: z.boolean(),
     sourceRecordIds: z
-      .array(z.string().min(1))
+      .array(outputRecordIdSchema)
       .min(1, "each mitigation option must cite at least one source record")
       .max(OUTPUT_LIMITS.maxOptionSourceRecordIds),
   })
@@ -87,8 +106,8 @@ export type MitigationOptionOutput = z.infer<typeof mitigationOptionOutputSchema
 
 const verificationGapOutputSchema = z
   .object({
-    requirementId: z.string().min(1),
-    category: z.string().min(1),
+    requirementId: outputRecordIdSchema,
+    category: z.string().min(1).max(OUTPUT_LIMITS.maxVerificationCategoryLength),
     summary: nonEmptyTrimmedString(OUTPUT_LIMITS.maxGapSummaryLength),
   })
   .strict();
@@ -108,14 +127,18 @@ export const impactAnalysisOutputSchema = z
     missionImpact: nonEmptyTrimmedString(OUTPUT_LIMITS.maxMissionImpactLength),
     scheduleExposureDays: z.number().int().nullable(),
     budgetExposureAmount: persistedMoneyStringSchema.nullable(),
-    affectedRequirementIds: z.array(z.string().min(1)).max(OUTPUT_LIMITS.maxAffectedIds),
-    affectedMilestoneIds: z.array(z.string().min(1)).max(OUTPUT_LIMITS.maxAffectedIds),
+    affectedRequirementIds: z.array(outputRecordIdSchema).max(OUTPUT_LIMITS.maxAffectedIds),
+    affectedMilestoneIds: z.array(outputRecordIdSchema).max(OUTPUT_LIMITS.maxAffectedIds),
     verificationGaps: z.array(verificationGapOutputSchema).max(OUTPUT_LIMITS.maxVerificationGaps),
-    assumptions: z.array(z.string().trim().min(1)).max(OUTPUT_LIMITS.maxAssumptions),
-    unknowns: z.array(z.string().trim().min(1)).max(OUTPUT_LIMITS.maxUnknowns),
+    assumptions: z
+      .array(z.string().trim().min(1).max(OUTPUT_LIMITS.maxAssumptionLength))
+      .max(OUTPUT_LIMITS.maxAssumptions),
+    unknowns: z
+      .array(z.string().trim().min(1).max(OUTPUT_LIMITS.maxUnknownLength))
+      .max(OUTPUT_LIMITS.maxUnknowns),
     confidence: z.enum(["LOW", "MEDIUM", "HIGH"]),
     sourceRecordIds: z
-      .array(z.string().min(1))
+      .array(outputRecordIdSchema)
       .min(1, "at least one source record must be cited")
       .max(OUTPUT_LIMITS.maxSourceRecordIds),
     // Exactly 3 — enforced with .length(3), not z.tuple(...). A tuple

@@ -22,6 +22,14 @@ export const AI_ERROR_CATEGORIES = [
   // The output was structurally valid but failed semantic/source validation
   // (fabricated source ID, deterministic-value mismatch, etc). Retryable.
   "SEMANTIC_VALIDATION_FAILED",
+  // The live provider's response was cut off before completion because the
+  // output-token ceiling (IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS, see
+  // openai-provider.ts) was reached — the response's own `status`/
+  // `incomplete_details.reason` reported this, not a parse failure.
+  // Retryable: a shorter, more concise response on retry may fit within the
+  // same ceiling. See docs/DECISIONS.md, "Phase 6 correction: provider-spend
+  // and output-bounds".
+  "INCOMPLETE_OUTPUT",
   // The provider succeeded and its output passed structural and semantic
   // validation, but writing the result to the database failed (connection
   // drop, constraint violation, transaction rollback). Never retryable: a
@@ -39,6 +47,7 @@ const RETRYABLE_CATEGORIES: ReadonlySet<AiErrorCategory> = new Set([
   "MALFORMED_JSON",
   "INVALID_OUTPUT_SCHEMA",
   "SEMANTIC_VALIDATION_FAILED",
+  "INCOMPLETE_OUTPUT",
 ]);
 
 export function isRetryableCategory(category: AiErrorCategory): boolean {
