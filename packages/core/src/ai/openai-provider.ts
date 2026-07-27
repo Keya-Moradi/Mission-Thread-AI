@@ -58,19 +58,37 @@ export const OPENAI_REQUEST_TIMEOUT_MS = 60_000;
 export const IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS = 8192;
 
 /**
+ * The OpenAI SDK's own `debug`/`info` log levels print request and response
+ * bodies — including the full prompt (which embeds `untrustedData`) and the
+ * model's raw output — to the process's stdout/stderr. By default the SDK
+ * resolves its log level from `process.env.OPENAI_LOG`, so a developer or a
+ * deployment environment setting `OPENAI_LOG=debug` for unrelated reasons
+ * (general SDK troubleshooting, a shared logging convention, etc.) would
+ * silently start logging prompts and model output through this provider
+ * with no code change and no warning. Explicitly forcing the client-level
+ * `logLevel` option to `"off"` overrides `OPENAI_LOG` entirely — the SDK
+ * checks the explicit client option before falling back to the environment
+ * variable (see `node_modules/openai/src/client.ts`'s constructor) — so
+ * this application never depends on a developer remembering to unset it.
+ */
+export const OPENAI_SDK_LOG_LEVEL = "off";
+
+/**
  * The only place a real `OpenAI` client is constructed with production
  * settings — pulled into its own pure, directly-testable function (rather
  * than inlined in the constructor) specifically so a test can assert on the
- * exact resolved `maxRetries`/`timeout` values without needing to intercept
- * the SDK's module internals. Constructing an `OpenAI` client never itself
- * opens a network connection (the SDK connects lazily, per-request), so
- * this is safe to call directly in a test with a fake API key.
+ * exact resolved `maxRetries`/`timeout`/`logLevel` values without needing to
+ * intercept the SDK's module internals. Constructing an `OpenAI` client
+ * never itself opens a network connection (the SDK connects lazily,
+ * per-request), so this is safe to call directly in a test with a fake API
+ * key.
  */
 export function buildOpenAiClientOptions(apiKey: string): ClientOptions {
   return {
     apiKey,
     maxRetries: OPENAI_SDK_MAX_RETRIES,
     timeout: OPENAI_REQUEST_TIMEOUT_MS,
+    logLevel: OPENAI_SDK_LOG_LEVEL,
   };
 }
 
@@ -132,24 +150,14 @@ export class OpenAiImpactAnalysisProvider implements LLMProvider {
     }
     const durationMs = Date.now() - startedAt;
 
-    // The request succeeded (no thrown error) but was truncated before the
-    // model finished, because it hit IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS —
-    // response.output_text in this state is a cut-off fragment, not
-    // necessarily even syntactically valid JSON, and must never be treated
-    // as a successful result. Thrown here (outside the try/catch above, so
-    // toProviderError() never reclassifies it) and propagates directly to
-    // the orchestrator's classifyProviderError(), which recognizes
+    // Terminal-state gate — thrown here, outside the try/catch above, so
+    // toProviderError() never reclassifies it; propagates directly to the
+    // orchestrator's classifyProviderError(), which recognizes
     // AiProviderError instances and returns their own category unchanged.
-    // Never includes response.output_text itself in the thrown message.
-    if (
-      response.status === "incomplete" &&
-      response.incomplete_details?.reason === "max_output_tokens"
-    ) {
-      throw new AiProviderError(
-        "The live provider's response was truncated before completion (output-token ceiling reached).",
-        "INCOMPLETE_OUTPUT",
-      );
-    }
+    // response.output_text is never parsed, returned, logged, or included
+    // in any thrown message unless this assertion passes. See
+    // assertOpenAiResponseCompleted() below.
+    assertOpenAiResponseCompleted(response);
 
     let rawOutput: unknown;
     try {
@@ -168,6 +176,89 @@ export class OpenAiImpactAnalysisProvider implements LLMProvider {
       durationMs,
     };
   }
+}
+
+/**
+ * True if any output item in the response is an explicit model refusal —
+ * checked before looking at `response.status` at all, since a model can in
+ * principle produce a `completed` response whose sole content is a refusal
+ * (a deliberate decision to decline, not a truncation or filter event) —
+ * see `ResponseOutputRefusal` in the `openai` package's own types. Never
+ * returns or logs the refusal text itself; only whether one is present.
+ */
+function hasResponseRefusal(response: OpenAI.Responses.Response): boolean {
+  for (const item of response.output ?? []) {
+    if (item.type !== "message") continue;
+    for (const content of item.content) {
+      if (content.type === "refusal") return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The one gate between a raw SDK response and `JSON.parse(response.output_text)`
+ * — `output_text` is never read anywhere else in this file. Every branch
+ * either returns normally (only for a genuinely usable `completed`
+ * response with no refusal) or throws a safe `AiProviderError`; none of
+ * the branches below ever include `response.error`, `response.output_text`,
+ * `response.incomplete_details`, or any other response-derived text in a
+ * thrown message. See docs/DECISIONS.md, "Phase 6 correction:
+ * provider-terminal-state and validation-error safety".
+ *
+ * Deliberately does not special-case a missing `response.status` as
+ * "probably fine" — a production-shaped response from the real API always
+ * sets it; an `undefined` value here only ever happens in a test fake that
+ * omitted it, which is exactly the case that must fail loudly rather than
+ * silently fall through to JSON parsing.
+ */
+export function assertOpenAiResponseCompleted(response: OpenAI.Responses.Response): void {
+  if (hasResponseRefusal(response)) {
+    throw new AiProviderError(
+      "The live provider declined to produce a response for this request.",
+      "PROVIDER_REFUSAL",
+    );
+  }
+
+  if (response.status === "completed") {
+    return;
+  }
+
+  if (response.status === "incomplete") {
+    const reason = response.incomplete_details?.reason;
+    if (reason === "max_output_tokens") {
+      throw new AiProviderError(
+        "The live provider's response was truncated before completion (output-token ceiling reached).",
+        "INCOMPLETE_OUTPUT",
+      );
+    }
+    if (reason === "content_filter") {
+      throw new AiProviderError(
+        "The live provider declined to produce a response for this request.",
+        "PROVIDER_REFUSAL",
+      );
+    }
+    // An absent or unrecognized incomplete reason is a genuine anomaly
+    // this application has no specific handling for — never parsed,
+    // never assumed safe. Classified as retryable: an unrecognized reason
+    // is more likely a provider-side quirk than a permanent, request-specific
+    // block, and the cost of being wrong is bounded by the orchestrator's
+    // existing 2-attempt cap either way. See docs/DECISIONS.md for this
+    // choice.
+    throw new AiProviderError(
+      "The live provider returned an incomplete response for an unrecognized reason.",
+      "TRANSIENT_PROVIDER_FAILURE",
+    );
+  }
+
+  // status is "failed" | "cancelled" | "in_progress" | "queued" | undefined
+  // | any other non-completed value this synchronous (non-streaming)
+  // request path should never legitimately see. Never parsed, never
+  // accepted, regardless of what response.output_text happens to contain.
+  throw new AiProviderError(
+    "The live provider did not return a completed response.",
+    "TRANSIENT_PROVIDER_FAILURE",
+  );
 }
 
 function buildRequestInput(request: LLMProviderRequest): string {

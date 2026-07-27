@@ -534,6 +534,123 @@ untrusted provider-controlled values. Full disposition is in
       pass; CI still `AI_MODE=mock`; the rate limiter was not redesigned;
       Phases 1–5 were not reopened; no Phase 7 functionality was added.
 
+## Phase 6 second correction pass — provider-terminal-state and validation-error safety — done (2026-07-27)
+
+Three confirmed defects fixed as one final, narrowly scoped repair: a
+response's completion state was checked too narrowly (only the specific
+`max_output_tokens` case was rejected, letting a content-filtered,
+refused, or otherwise non-terminal response fall through to JSON parsing
+if `output_text` happened to look valid); structural (Zod) validation
+errors still forwarded `issue.message`, which for an `unrecognized_keys`
+violation embeds the offending property's own name; and the OpenAI SDK's
+own request/response logging was never explicitly disabled, so an ambient
+`OPENAI_LOG=debug` could silently print prompts and model output. Full
+disposition is in `docs/DECISIONS.md`'s "(Phase 6 correction pass)" entry
+dated 2026-07-27.
+
+- [x] **Completed-response gate:** new `assertOpenAiResponseCompleted()`
+      (`packages/core/src/ai/openai-provider.ts`) is the one point between
+      a raw response and `JSON.parse(response.output_text)`. Checks, in
+      order: explicit refusal (any output item's content containing a
+      `type: "refusal"` entry) → non-retryable `PROVIDER_REFUSAL`;
+      `status === "completed"` with no refusal → proceeds to parsing;
+      `incomplete`/`max_output_tokens` → retryable `INCOMPLETE_OUTPUT`;
+      `incomplete`/`content_filter` → non-retryable `PROVIDER_REFUSAL`;
+      `incomplete` with an absent/unrecognized reason → retryable
+      `TRANSIENT_PROVIDER_FAILURE` (a documented judgment call); any other
+      status (`failed`/`cancelled`/`in_progress`/`queued`/`undefined`) →
+      `TRANSIENT_PROVIDER_FAILURE`. No branch ever includes
+      `response.error`/`output_text`/`incomplete_details`/refusal text in
+      a thrown message.
+- [x] New `PROVIDER_REFUSAL` category added to `AI_ERROR_CATEGORIES`
+      (`packages/core/src/ai/errors.ts`), deliberately excluded from
+      `RETRYABLE_CATEGORIES`.
+- [x] **Safe structural-error formatter:** `summarizeOutputSchemaErrors()`
+      (`packages/core/src/ai/output-schema.ts`) rewritten to build every
+      message from `issue.code`/`issue.path`/schema-authored
+      limits/allowed-value sets only, via a new `summarizeStructuralIssue()`
+      — never `issue.message`, `issue.input`, `issue.keys`, or a received
+      enum value. `unrecognized_keys` reports only
+      `"<path>: unexpected fields are not allowed."`, never the offending
+      key name(s). A small fixed lookup covers the schema's one
+      `.refine()`-produced custom message.
+- [x] **True serialized validation-feedback byte bound:**
+      `sanitizeProviderValidationErrors()`
+      (`packages/core/src/ai/validate-provider-output.ts`) now checks
+      `Buffer.byteLength(JSON.stringify([...result, candidateError]), "utf8")`
+      before accepting each candidate error, replacing the prior
+      raw-string-byte-sum measurement, which undercounted JSON's
+      structural overhead and escape-sequence expansion (quotes,
+      backslashes, newlines, multi-byte unicode).
+- [x] **SDK logging forced off:** new `OPENAI_SDK_LOG_LEVEL = "off"`,
+      included in `buildOpenAiClientOptions()` as `logLevel: "off"` —
+      verified directly against the SDK's own source that the explicit
+      client option is checked before the ambient `OPENAI_LOG` variable,
+      and with a test that sets `OPENAI_LOG=debug` immediately before
+      construction and confirms the resolved level is still `"off"`
+      (restored via `afterEach`).
+- [x] `minLength`/`maxLength` documentation wording corrected: no longer
+      claims a flat universal "unsupported for every model" fact; now
+      documents OpenAI's own guidance (unsupported for fine-tuned models
+      specifically, within its broader type-specific-keyword guidance) and
+      frames this repository's unconditional stripping as a deliberate,
+      conservative compatibility choice, not an assumption that every
+      model would otherwise reject them.
+- [x] Preserved unchanged, re-verified: `maxRetries: 0`, the 60-second
+      timeout, `max_output_tokens: 8192`, the orchestrator's 2-attempt
+      cap, the live-eval 6-call cap, the total provider-output byte
+      ceiling, per-string output limits, semantic source-ID redaction,
+      bounded model input, prompt-injection isolation, the human-approval
+      boundary, the process-local rate limiter, and mock-only CI — none
+      redesigned or weakened.
+- [x] Tests: `packages/core/src/ai/openai-provider.test.ts` gained an
+      `assertOpenAiResponseCompleted` unit block (completed/all incomplete
+      reasons/explicit refusal/six non-terminal statuses via `it.each`/an
+      under-specified fake), an end-to-end block (no leaked text, exactly
+      one `responses.create()` call for content-filter and refusal cases),
+      and an SDK-logging block (`logLevel` value, real-client resolution,
+      `OPENAI_LOG` override-resistance, an injected-logger check, and a
+      "nothing else regressed" check); `output-schema.test.ts` gained a
+      `summarizeOutputSchemaErrors` block covering all four required
+      canary cases (top-level, nested mitigation-option, verification-gap,
+      invalid-enum) plus array-count/custom-refine/oversized-string/
+      never-reads-issue.message assertions; `validate-provider-output.test.ts`
+      gained three true-serialized-byte-ceiling tests (mixed
+      quote/backslash/newline/unicode set, a set engineered to defeat the
+      old raw-sum measurement, a single backslash-heavy string);
+      `orchestrator-provider-spend.test.ts` gained an
+      unrecognized-key-canary end-to-end test alongside the prior pass's
+      giant-ID test. 35 new/modified tests; 691 core (656 → 691) + 36 web
+      (unchanged) = 727 total. All 8 `npm run eval:mock` scenarios and all
+      12 tagged metrics continue to pass, unchanged in outcome.
+- [x] Docs: `docs/DECISIONS.md` (1 new "(Phase 6 correction pass)" entry
+      dated 2026-07-27), `docs/ARCHITECTURE.md` ("Terminal-state gate" and
+      "Provider-terminal-state and validation-error safety" subsections
+      added, "Provider-facing JSON Schema"/"Providers" paragraphs updated,
+      minLength/maxLength wording corrected), `docs/THREAT_MODEL.md`
+      ("Hallucinated facts and IDs" and "Unsafe logs" sections updated
+      with the confirmed-defect/fix/verification detail), `README.md`
+      ("Mock vs. live AI" section extended with the terminal-state gate
+      and SDK-logging paragraphs), `evals/README.md` (live-eval section
+      notes the same terminal-state gate and logging-disabled behavior
+      apply there), this file.
+- [x] Quality gate: `node -v`, `npm ci`-equivalent state, `db:validate`,
+      `db:generate`, `lint`, `format:check`, `typecheck` (all workspaces +
+      `evals/`), `test` (727), `build`, `smoke:test` (82/82), `eval:mock`
+      (8/8, 12/12 metrics) all passing before any destructive operation.
+      `npm audit --json` reviewed: identical disposition to the prior
+      pass — 16 findings (1 moderate, 15 high), same packages, no new
+      action taken or needed (nothing in this pass touched dependencies).
+      Fresh `AskUserQuestion` authorization obtained for `db:reset:test`;
+      the same third-party Prisma CLI AI-agent consent guardrail was
+      encountered again and honored, not bypassed. `db:reset:test` then
+      `test:e2e` (1/1), then `test:e2e` again with no further reset (1/1),
+      confirming repeatability. `eval:live` was not run. Confirmed
+      throughout: no real OpenAI request was made at any point in this
+      pass; CI still `AI_MODE=mock`; the rate limiter and existing spend
+      controls were not redesigned; Phases 1–5 were not reopened; no
+      Phase 7 functionality was added.
+
 ## Phase 7 — Graph and MCP (not started)
 
 ## Phase 8 — Delivery (not started)

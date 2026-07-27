@@ -57,30 +57,44 @@ function measureProviderOutputBytes(rawOutput: unknown): number | null {
 /**
  * The one shared sanitizer every validation-failure error list passes
  * through before being returned. Caps the number of errors, the length of
- * each individual error, and the total serialized size of the whole list —
- * three independent, composable bounds, not a single "pick one" limit.
- * Never truncates mid-string in a way that could leave a fragment of a
- * provider-controlled value behind: by the time errors reach this
- * function, `validateImpactAnalysisSemantics()` (output-validation.ts) has
- * already ensured none of them contain a raw ID, option title, or any
- * other attacker-controlled text in the first place — every message here
- * is built entirely from this codebase's own fixed strings and safe
- * field-path/array-index references, so a length cap is a defense-in-depth
- * bound, not the mechanism that makes these messages safe.
+ * each individual error, and the total *serialized* size of the whole
+ * list — three independent, composable bounds, not a single "pick one"
+ * limit. Never truncates mid-string in a way that could leave a fragment
+ * of a provider-controlled value behind: by the time errors reach this
+ * function, `validateImpactAnalysisSemantics()` (output-validation.ts) and
+ * `summarizeOutputSchemaErrors()` (output-schema.ts) have already ensured
+ * none of them contain a raw ID, option title, unrecognized key name, or
+ * any other attacker-controlled text in the first place — every message
+ * here is built entirely from this codebase's own fixed strings and safe
+ * field-path/array-index references, so the length cap is a
+ * defense-in-depth bound, not the mechanism that makes these messages
+ * safe.
+ *
+ * `MAX_VALIDATION_FEEDBACK_BYTES` bounds `Buffer.byteLength(JSON.stringify(result),
+ * "utf8")` — the array's actual serialized form, exactly as it's stored in
+ * `ImpactAnalysis.validationErrors` (a JSON column) and as it would appear
+ * inline in a retried prompt — not merely the sum of each raw string's own
+ * UTF-8 byte length. `JSON.stringify` adds structural overhead (`[`, `]`,
+ * `,`, the quotes around each string) and can *expand* a string's byte
+ * count further still (escaping `"`, `\`, and control characters to
+ * multi-character sequences like `\"`/`\\`/`\n`) — summing raw strings
+ * alone silently undercounts both, so a list that looked safely under the
+ * ceiling by the old measurement could still exceed it once actually
+ * serialized. Each candidate error is appended to a *copy* of the
+ * in-progress result and only kept if the newly re-serialized array still
+ * fits — never decided from a per-string byte count in isolation.
  */
 export function sanitizeProviderValidationErrors(errors: readonly string[]): string[] {
   const result: string[] = [];
-  let totalBytes = 0;
   for (const rawError of errors) {
     if (result.length >= MAX_VALIDATION_ERROR_COUNT) break;
-    const error =
+    const candidateError =
       rawError.length > MAX_VALIDATION_ERROR_LENGTH
         ? rawError.slice(0, MAX_VALIDATION_ERROR_LENGTH)
         : rawError;
-    const errorBytes = Buffer.byteLength(error, "utf8");
-    if (totalBytes + errorBytes > MAX_VALIDATION_FEEDBACK_BYTES) break;
-    result.push(error);
-    totalBytes += errorBytes;
+    const candidateBytes = Buffer.byteLength(JSON.stringify([...result, candidateError]), "utf8");
+    if (candidateBytes > MAX_VALIDATION_FEEDBACK_BYTES) break;
+    result.push(candidateError);
   }
   return result;
 }

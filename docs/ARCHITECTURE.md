@@ -306,14 +306,22 @@ and output-bounds", and `docs/THREAT_MODEL.md`.
 **Provider-facing JSON Schema.** `openai-schema.ts`'s
 `buildOpenAiImpactAnalysisJsonSchema()` generates a JSON Schema from
 `impactAnalysisOutputSchema` via `z.toJSONSchema()` — still the single
-authoritative source, never a second hand-maintained schema — strips
-`minLength`/`maxLength` (confirmed unsupported by OpenAI Structured
-Outputs' strict mode — see `docs/DECISIONS.md`, "Phase 6 correction:
-provider-spend and output-bounds" — leaving them in would misrepresent
-what the provider-facing schema actually guarantees; the authoritative
-runtime Zod `.min()`/`.max()` checks are completely unaffected and remain
-the real enforcement, backed by `IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS` as the
-provider-level size ceiling) — and then recursively verifies it contains
+authoritative source, never a second hand-maintained schema — and
+conservatively strips `minLength`/`maxLength` from the provider-facing
+copy for every model. OpenAI's Structured Outputs documentation describes
+these (and related type-specific keywords) as additionally unsupported
+for fine-tuned models specifically, within its broader "some type-specific
+keywords are not yet supported" guidance — this project doesn't assume
+that carve-out is the whole story for every base/fine-tuned combination it
+might ever use, and stripping them everywhere costs nothing: the
+authoritative runtime Zod `.min()`/`.max()` checks are completely
+unaffected and remain the real enforcement regardless, backed by
+`IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS` as the provider-level size ceiling. See
+`docs/DECISIONS.md`, "Phase 6 correction: provider-terminal-state and
+validation-error safety," for the corrected wording (the original Phase 6
+correction pass had stated this as an unqualified universal fact, which
+overstated what could actually be verified). The generator then
+recursively verifies the result contains
 none of `prefixItems`, `unevaluatedItems`, `contains`, `minContains`,
 `maxContains`, `propertyNames`, `patternProperties` (keywords
 draft-2020-12 permits but OpenAI's strict mode doesn't document support
@@ -333,19 +341,46 @@ no streaming/tools/web-search/conversations, a server-controlled
 `max_output_tokens: IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS` (8192, covering both
 visible output and reasoning tokens) on every request, and its own SDK
 client constructed via `buildOpenAiClientOptions()` — `maxRetries: 0`,
-`timeout: OPENAI_REQUEST_TIMEOUT_MS` (60 seconds) — explicitly overriding
-the SDK's own defaults (2 automatic retries, a 10-minute timeout) so one
-provider invocation always equals exactly one HTTP request and the
-orchestrator (below) remains the sole retry authority. A response whose
-`status`/`incomplete_details.reason` reports it was truncated at the
-token ceiling is never treated as successful — it's thrown as a retryable
-`INCOMPLETE_OUTPUT` `AiProviderError`, never including the truncated text
-itself. No automated test, smoke check, or CI step ever exercises this
-path against the real API — every test here uses a fake, dependency-injected
-`responses.create`, including the SDK-configuration tests (which construct
-a real `OpenAI` client with a fake API key — safe, since construction
-alone never opens a network connection — and read its resolved
-`maxRetries`/`timeout` fields directly).
+`timeout: OPENAI_REQUEST_TIMEOUT_MS` (60 seconds), `logLevel: "off"` —
+explicitly overriding the SDK's own defaults (2 automatic retries, a
+10-minute timeout, and a log level that resolves from the ambient
+`OPENAI_LOG` environment variable) so one provider invocation always
+equals exactly one HTTP request, the orchestrator (below) remains the sole
+retry authority, and no request/response body (which would include the
+prompt's embedded `untrustedData` and the model's raw output) can reach
+stdout/stderr through the SDK's own logging regardless of what `OPENAI_LOG`
+is set to in the ambient environment — verified directly against the SDK's
+own source that the explicit client option is checked before the
+environment variable, and with a test that sets `OPENAI_LOG=debug`
+immediately before constructing a client and confirms the resolved log
+level is still `"off"`.
+
+**Terminal-state gate (Phase 6 correction).** `assertOpenAiResponseCompleted(response)`
+is the one point between a raw SDK response and `JSON.parse(response.output_text)`
+— `output_text` is read nowhere else in the file. Checks, in order: an
+explicit model refusal (any output item's content containing a
+`type: "refusal"` entry, checked before `status` at all) throws
+non-retryable `PROVIDER_REFUSAL`; `status === "completed"` (with no
+refusal) is the only path that proceeds to parsing; `incomplete` with
+reason `max_output_tokens` throws retryable `INCOMPLETE_OUTPUT`;
+`incomplete` with reason `content_filter` throws non-retryable
+`PROVIDER_REFUSAL`; `incomplete` with an absent/unrecognized reason throws
+retryable `TRANSIENT_PROVIDER_FAILURE` (a documented judgment call — an
+unrecognized reason is treated as more likely a provider-side quirk than a
+permanent block, and the cost of being wrong is bounded by the
+orchestrator's existing 2-attempt cap); any other status (`failed`,
+`cancelled`, `in_progress`, `queued`, or `undefined`) also throws
+`TRANSIENT_PROVIDER_FAILURE`. No branch ever includes `response.error`,
+`response.output_text`, `response.incomplete_details`, or refusal text in
+a thrown message. See `docs/DECISIONS.md`, "Phase 6 correction:
+provider-terminal-state and validation-error safety."
+
+No automated test, smoke check, or CI step ever exercises this provider
+path against the real API — every test here uses a fake,
+dependency-injected `responses.create`, including the SDK-configuration
+tests (which construct a real `OpenAI` client with a fake API key — safe,
+since construction alone never opens a network connection — and read its
+resolved `maxRetries`/`timeout`/`logLevel` fields directly).
 
 **Attempt-evidence persistence.** `attempt-persistence.ts`'s
 `buildAttemptSourceReferenceSnapshot(modelInput, output?)` builds the
@@ -640,6 +675,42 @@ ever touches it — never throwing, never including the raw output in its
 error. See `docs/DECISIONS.md`, "Phase 6 correction: provider-spend and
 output-bounds", and `docs/THREAT_MODEL.md` for the updated
 denial-of-wallet/denial-of-service residual-risk assessment.
+
+**Provider-terminal-state and validation-error safety (second Phase 6
+correction pass).** Three further confirmed defects, closed together: (1)
+**a response's completion state was checked too narrowly** — only the
+specific `incomplete`/`max_output_tokens` case was rejected, so a
+`content_filter`-truncated response, a `failed`/`cancelled`/non-terminal
+response, or an explicit model refusal could fall through to
+`JSON.parse()` as though it were a normal success if `output_text`
+happened to already contain syntactically valid JSON — fixed with
+`assertOpenAiResponseCompleted()` (see "Terminal-state gate" above), the
+one gate between a raw response and JSON parsing, and a new non-retryable
+`PROVIDER_REFUSAL` error category (added to `AI_ERROR_CATEGORIES`,
+deliberately excluded from `RETRYABLE_CATEGORIES`); (2) **structural (Zod)
+validation errors still forwarded `issue.message` verbatim** — Zod's
+default `unrecognized_keys` message embeds the offending property's own
+_name_, so a provider could inject arbitrary text into persisted
+`ImpactAnalysis.validationErrors` and retried `validationFeedback` using
+nothing but a well-chosen extra property name, no value needed — fixed by
+replacing `summarizeOutputSchemaErrors()`'s implementation with a
+`summarizeStructuralIssue()` formatter that builds every message from
+`issue.code`/`issue.path`/schema-authored limits only, never
+`issue.message`/`issue.input`/`issue.keys`/a received enum value; (3)
+**`sanitizeProviderValidationErrors()` measured only the sum of each raw
+string's own bytes**, not the actual serialized array
+(`JSON.stringify(result)`) that gets persisted and retried — `JSON.stringify`
+adds structural overhead and can expand a string's byte count further via
+escape sequences, so a list that looked safely under
+`MAX_VALIDATION_FEEDBACK_BYTES` by the old measurement could still exceed
+it once actually serialized — fixed by checking
+`Buffer.byteLength(JSON.stringify([...result, candidateError]), "utf8")`
+before accepting each candidate error, rather than summing raw bytes.
+Also disabled the OpenAI SDK's own request/response logging outright
+(`logLevel: "off"` in `buildOpenAiClientOptions()`, overriding
+`OPENAI_LOG` — see "Providers" above), since `debug`/`info` SDK log levels
+print full prompt and response bodies. See `docs/DECISIONS.md`, "Phase 6
+correction: provider-terminal-state and validation-error safety."
 
 **Prompt-injection defenses.** Unchanged in design from Phase 4 (data
 isolation + fixed system instructions + bounded projection + strict

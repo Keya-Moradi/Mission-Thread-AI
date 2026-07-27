@@ -304,7 +304,7 @@ method.
   check so the mock evaluation suite exercises the identical logic
   (`evals/scenarios.ts` scenario 6); tests assert a fabricated ID causes
   rejection, identified by its field path/array index.
-- **Phase 6 correction controls:** the returned validation error
+- **Phase 6 first correction-pass controls:** the returned validation error
   previously named the fabricated ID (and, for a duplicate-citation error,
   the mitigation option's own provider-generated title) directly — a
   confirmed defect, since these errors are both persisted
@@ -317,6 +317,24 @@ evidence allowlist."`); a new `sanitizeProviderValidationErrors()`
   additionally bounds the count/length/total size of every returned error
   list. See "Prompt injection" below and `docs/DECISIONS.md`, "Phase 6
   correction: provider-spend and output-bounds."
+- **Phase 6 second correction-pass controls:** the fix above only covered
+  _semantic_ validation (`output-validation.ts`); _structural_ (Zod)
+  validation had the identical defect one layer down —
+  `summarizeOutputSchemaErrors()` forwarded `issue.message` verbatim, and
+  Zod's own default `unrecognized_keys` message embeds the offending
+  property's _name_ (e.g. `Unrecognized key: "IGNORE_ALL_RULES..."`), so a
+  provider could inject arbitrary text using nothing but a well-chosen
+  extra property name, no value required. Fixed: a new
+  `summarizeStructuralIssue()` builds every structural-error message from
+  `issue.code`/`issue.path`/schema-authored limits only, never
+  `issue.message`. Separately, `sanitizeProviderValidationErrors()`'s
+  byte ceiling was found to measure only the sum of each raw string's own
+  bytes, not the actual `JSON.stringify()`-serialized array that gets
+  persisted/retried (which is larger, due to JSON structural overhead and
+  escape-sequence expansion) — fixed to measure the true serialized
+  candidate array before accepting each error. See `docs/DECISIONS.md`,
+  "Phase 6 correction: provider-terminal-state and validation-error
+  safety."
 - **Residual risk:** a hallucinated but schema-and-semantically-valid
   narrative sentence (in `executiveSummary`/`missionImpact` free text) is
   not detectable by structural or ID-based validation — a human reviewer
@@ -324,11 +342,12 @@ evidence allowlist."`); a new `sanitizeProviderValidationErrors()`
   `docs/SPEC.md` — this system is decision support, not autonomous
   decision-making).
 - **Verification:** `npm test` (including
-  `packages/core/src/ai/output-validation.test.ts`'s and
-  `validate-provider-output.test.ts`'s explicit
-  "fabricated-value-never-appears-in-errors" assertions,
-  `orchestrator-provider-spend.test.ts`'s giant-canary-never-reaches-the-
-  retry-request-persisted-errors-or-logs test), `npm run eval:mock`
+  `packages/core/src/ai/output-validation.test.ts`'s,
+  `output-schema.test.ts`'s, and `validate-provider-output.test.ts`'s
+  explicit "fabricated-value-never-appears-in-errors" and
+  unrecognized-key-canary assertions,
+  `orchestrator-provider-spend.test.ts`'s giant-canary/unrecognized-key-canary-
+  never-reaches-the-retry-request-persisted-errors-or-logs tests), `npm run eval:mock`
   (scenarios 1, 6).
 
 ### Tampered evidence
@@ -538,10 +557,20 @@ evidence allowlist."`); a new `sanitizeProviderValidationErrors()`
 - **Asset:** log output (structured JSON via `logAnalysisEvent()`,
   `console.error` in destructive-operation scripts).
 - **Attack path:** a log line includes a secret, a full prompt, raw
-  untrusted text, or a database connection string.
-- **Likelihood:** low — `logAnalysisEvent()`'s `AnalysisLogFields` is a
-  closed, explicitly-typed field set; nothing calls it with an arbitrary
-  object.
+  untrusted text, or a database connection string. A second, distinct
+  attack path for this specific application: the _third-party OpenAI SDK's
+  own_ logging (not `logAnalysisEvent()`) prints full request/response
+  bodies at its `debug`/`info` log levels, and by default resolves that
+  level from the ambient `OPENAI_LOG` environment variable — an operator
+  or deployment environment setting `OPENAI_LOG=debug` for an unrelated
+  reason would silently start logging prompts (which embed
+  `untrustedData`) and raw model output through this provider.
+- **Likelihood:** low for the first path — `logAnalysisEvent()`'s
+  `AnalysisLogFields` is a closed, explicitly-typed field set; nothing
+  calls it with an arbitrary object. Was medium for the second path before
+  the Phase 6 second correction pass, since `OPENAI_LOG` is a genuinely
+  common SDK-troubleshooting environment variable that this application
+  had never explicitly overridden.
 - **Impact:** medium-high if it occurred (log aggregators are often less
   access-controlled than the primary database).
 - **Existing controls (Phase 4):** the fixed safe-field allowlist;
@@ -552,11 +581,21 @@ evidence allowlist."`); a new `sanitizeProviderValidationErrors()`
   underlying event carries injected canary text in its notes — proving the
   log line still contains none of it (the log only ever includes the event
   ID, not its content).
+- **Phase 6 second correction-pass controls:** `buildOpenAiClientOptions()`
+  now explicitly sets `logLevel: "off"` (`OPENAI_SDK_LOG_LEVEL`),
+  overriding `OPENAI_LOG` unconditionally — verified directly against the
+  SDK's own source that the explicit client option is checked before the
+  environment variable, and with a test that sets `OPENAI_LOG=debug`
+  immediately before constructing a client and confirms the resolved log
+  level is still `"off"`. This application no longer depends on a
+  developer or deployment environment remembering to leave `OPENAI_LOG`
+  unset.
 - **Residual risk:** none identified beyond the general "a future field
   added carelessly to `AnalysisLogFields` could reintroduce this" risk,
   which is why the type stays a closed, explicit interface rather than an
   open `Record<string, unknown>`.
-- **Verification:** `npm test`.
+- **Verification:** `npm test` (including
+  `packages/core/src/ai/openai-provider.test.ts`'s SDK-logging block).
 
 ### Session theft
 

@@ -164,12 +164,107 @@ export const impactAnalysisOutputSchema = z
 export type ImpactAnalysisOutput = z.infer<typeof impactAnalysisOutputSchema>;
 
 /**
+ * Renders a Zod issue's `path` as `a.b[2].c` — string segments joined with
+ * `.`, numeric (array-index) segments wrapped in `[...]` — matching the
+ * same path-based message style `output-validation.ts`'s semantic checks
+ * already use. An empty path (a top-level `.refine()`/`unrecognized_keys`
+ * violation on the object itself) renders as `"(root)"`.
+ */
+function formatIssuePath(path: readonly PropertyKey[]): string {
+  if (path.length === 0) return "(root)";
+  let result = "";
+  for (const segment of path) {
+    if (typeof segment === "number") {
+      result += `[${segment}]`;
+    } else {
+      result += result.length > 0 ? `.${String(segment)}` : String(segment);
+    }
+  }
+  return result;
+}
+
+/**
+ * Fixed, safe messages for the specific `.refine()` custom-validation
+ * checks this schema defines, keyed by the exact `path` Zod reports for
+ * each — the only "custom"-code issues this schema can ever actually
+ * produce. Never a general-purpose lookup: an unrecognized path here
+ * (which should never happen given the schema above, but is never
+ * assumed) falls through to the generic per-path message in
+ * `summarizeStructuralIssue()` below rather than ever reading
+ * `issue.message`.
+ */
+const KNOWN_CUSTOM_ISSUE_MESSAGES: Record<string, string> = {
+  mitigationOptions: "exactly one mitigation option must be marked as recommended.",
+};
+
+/**
+ * Builds one safe, human-readable string per Zod structural-validation
+ * issue — entirely from `issue.code`, `issue.path`, and schema-authored
+ * numeric/format metadata (`.minimum`/`.maximum`/`.values`), **never**
+ * from `issue.message`, `issue.input`, `issue.keys`, a received enum
+ * value, or any other provider-controlled content. This matters most for
+ * `unrecognized_keys`: a naive `` `${path}: ${issue.message}` `` (Zod's
+ * default `unrecognized_keys` message embeds the offending key name
+ * verbatim, e.g. `Unrecognized key: "IGNORE_ALL_RULES..."`) would let a
+ * provider inject arbitrary text into `ImpactAnalysis.validationErrors`
+ * (persisted) and the next attempt's `validationFeedback` (fed back into
+ * the prompt) using nothing but a well-chosen *property name* — no value
+ * needed. Every branch below reports only the field path and, where
+ * genuinely useful, schema-authored limits. See docs/DECISIONS.md, "Phase
+ * 6 correction: provider-terminal-state and validation-error safety", and
+ * docs/THREAT_MODEL.md.
+ */
+function summarizeStructuralIssue(issue: z.core.$ZodIssue): string {
+  const path = formatIssuePath(issue.path);
+  switch (issue.code) {
+    case "unrecognized_keys":
+      // Deliberately never lists issue.keys — see the function doc comment.
+      return `${path}: unexpected fields are not allowed.`;
+    case "invalid_type":
+      return `${path}: value has an unexpected type.`;
+    case "invalid_value": {
+      // issue.values is the schema-authored ALLOWED set (e.g. ["LOW",
+      // "MEDIUM", "HIGH"]) — safe to include. The provider's actual
+      // (rejected) value is never read here.
+      const allowed = Array.isArray(issue.values) ? issue.values.map(String).join(", ") : undefined;
+      return allowed
+        ? `${path}: value is not an allowed value (expected one of: ${allowed}).`
+        : `${path}: value is not an allowed value.`;
+    }
+    case "too_small":
+      if (issue.origin === "array") {
+        return issue.exact
+          ? `${path}: exactly ${issue.minimum} item(s) are required.`
+          : `${path}: value has fewer than the minimum required ${issue.minimum} item(s).`;
+      }
+      return `${path}: value is shorter than the minimum permitted length of ${issue.minimum} character(s).`;
+    case "too_big":
+      if (issue.origin === "array") {
+        return issue.exact
+          ? `${path}: exactly ${issue.maximum} item(s) are required.`
+          : `${path}: value has more than the maximum permitted ${issue.maximum} item(s).`;
+      }
+      return `${path}: value exceeds the maximum permitted length of ${issue.maximum} character(s).`;
+    case "invalid_format":
+      return `${path}: value does not match the required format.`;
+    case "custom":
+      return `${path}: ${KNOWN_CUSTOM_ISSUE_MESSAGES[path] ?? "value failed validation."}`;
+    default:
+      // Any future Zod issue code this schema doesn't otherwise recognize —
+      // still safe (path + a fixed phrase only), never issue.message.
+      return `${path}: value failed validation.`;
+  }
+}
+
+/**
  * Turns a ZodError into a short list of safe, human-readable strings —
  * concise enough to feed back to the provider as retry guidance
  * (LLMProviderRequest.validationFeedback) and safe enough to persist on
  * ImpactAnalysis.validationErrors, since they only ever describe this
- * schema's own field paths/messages, never raw provider output.
+ * schema's own field paths and fixed, application-authored phrases —
+ * never Zod's own issue.message, which can embed provider-controlled text
+ * (see summarizeStructuralIssue() above).
  */
 export function summarizeOutputSchemaErrors(error: z.ZodError): string[] {
-  return error.issues.map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`);
+  return error.issues.map(summarizeStructuralIssue);
 }

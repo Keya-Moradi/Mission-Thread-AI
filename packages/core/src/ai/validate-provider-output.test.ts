@@ -221,4 +221,46 @@ describe("sanitizeProviderValidationErrors", () => {
   it("[empty input] returns an empty array", () => {
     expect(sanitizeProviderValidationErrors([])).toEqual([]);
   });
+
+  it('[true serialized-byte ceiling, Phase 6 correction] Buffer.byteLength(JSON.stringify(sanitized), "utf8") never exceeds MAX_VALIDATION_FEEDBACK_BYTES, even with quotes/backslashes/unicode/newlines that expand under JSON.stringify', () => {
+    // Every one of these strings is shorter, in raw .length terms, than
+    // MAX_VALIDATION_ERROR_LENGTH — the old byte-summing implementation
+    // would have accepted all of them, since it measured only each raw
+    // string's own UTF-8 bytes and never accounted for JSON.stringify's
+    // structural overhead (quotes, commas, brackets) or per-character
+    // escape expansion (" -> \", \ -> \\, newline -> \n) and multi-byte
+    // UTF-8 encoding for non-ASCII characters.
+    const errors = Array.from({ length: 200 }, (_, i) => {
+      // Mix of quotes, backslashes, newlines, and multi-byte unicode
+      // (emoji + accented characters) that all expand under JSON.stringify.
+      return `error ${i}: "quoted" \\backslash\\ \nnewline 日本語 emoji 🎉 more"quotes"and\\slashes`;
+    });
+    const sanitized = sanitizeProviderValidationErrors(errors);
+    const actualSerializedBytes = Buffer.byteLength(JSON.stringify(sanitized), "utf8");
+    expect(actualSerializedBytes).toBeLessThanOrEqual(MAX_VALIDATION_FEEDBACK_BYTES);
+  });
+
+  it("[serialized ceiling accounts for JSON structural overhead] a set of strings whose raw byte sum is just under the ceiling, but whose serialized array (brackets/commas/quotes) would exceed it, is still kept within the true ceiling", () => {
+    // Each string is exactly at MAX_VALIDATION_ERROR_LENGTH; with enough
+    // of them the raw per-string byte sum alone would fit comfortably
+    // under MAX_VALIDATION_FEEDBACK_BYTES, but the fully serialized JSON
+    // array (2 bytes per string for quotes, 1 byte per separator, plus 2
+    // bytes for the enclosing brackets) must still respect the same
+    // ceiling once actually measured.
+    const errors = Array.from({ length: MAX_VALIDATION_ERROR_COUNT }, (_, i) =>
+      `x${i}`.padEnd(MAX_VALIDATION_ERROR_LENGTH, "y"),
+    );
+    const sanitized = sanitizeProviderValidationErrors(errors);
+    const actualSerializedBytes = Buffer.byteLength(JSON.stringify(sanitized), "utf8");
+    expect(actualSerializedBytes).toBeLessThanOrEqual(MAX_VALIDATION_FEEDBACK_BYTES);
+  });
+
+  it("[quote/backslash-heavy single string] a single string engineered so its raw length is safe but its JSON-escaped form is much larger is still bounded by the true serialized ceiling", () => {
+    // Every character is a backslash — .length is small, but each one
+    // becomes two bytes (\\) once JSON.stringify escapes it.
+    const backslashHeavy = "\\".repeat(MAX_VALIDATION_ERROR_LENGTH);
+    const sanitized = sanitizeProviderValidationErrors([backslashHeavy]);
+    const actualSerializedBytes = Buffer.byteLength(JSON.stringify(sanitized), "utf8");
+    expect(actualSerializedBytes).toBeLessThanOrEqual(MAX_VALIDATION_FEEDBACK_BYTES);
+  });
 });

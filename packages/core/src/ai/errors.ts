@@ -30,6 +30,18 @@ export const AI_ERROR_CATEGORIES = [
   // same ceiling. See docs/DECISIONS.md, "Phase 6 correction: provider-spend
   // and output-bounds".
   "INCOMPLETE_OUTPUT",
+  // The provider explicitly declined to answer — either an `incomplete`
+  // response with `incomplete_details.reason === "content_filter"`, or a
+  // `completed` response whose sole output content is a `refusal` item
+  // (see `assertOpenAiResponseCompleted()` in openai-provider.ts). Never
+  // retryable: a content-policy refusal is a property of the request
+  // itself, not a transient condition — retrying the identical request
+  // would just spend another call to receive the same refusal. The
+  // refusal text itself is never persisted, logged, or exposed; only this
+  // fixed category and a trace ID are ever surfaced. See
+  // docs/DECISIONS.md, "Phase 6 correction: provider-terminal-state and
+  // validation-error safety".
+  "PROVIDER_REFUSAL",
   // The provider succeeded and its output passed structural and semantic
   // validation, but writing the result to the database failed (connection
   // drop, constraint violation, transaction rollback). Never retryable: a

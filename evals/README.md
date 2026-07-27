@@ -167,6 +167,18 @@ When it does run, it:
   one-retry-on-validation-failure policy — doing so would double an
   already-capped worst-case call count for what's meant to be a small,
   bounded sanity check, not a full pipeline exercise.
+- Only ever parses a genuinely `"completed"` response — the same
+  `assertOpenAiResponseCompleted()` terminal-state gate production
+  analyses use rejects an explicit model refusal, a content-filtered or
+  otherwise-incomplete response, and any non-terminal status before
+  `output_text` is ever read (see "Provider-terminal-state and
+  validation-error safety" in `docs/DECISIONS.md`). A refusal or
+  incomplete response for any one fixture throws — this script has no
+  per-fixture try/catch, matching how it already handled a malformed-JSON
+  or transient-provider error before this correction pass — so a real run
+  hitting one of these mid-way stops there rather than continuing to the
+  remaining fixtures; this is a pre-existing characteristic of the
+  script's intentionally minimal error handling, not a new gap.
 - Runs every response through the same production `validateProviderOutput()`
   as the mock suite and everywhere else — including the same pre-validation
   total-size guard, per-string output bounds, and redacted/bounded
@@ -174,7 +186,10 @@ When it does run, it:
   `docs/ARCHITECTURE.md`).
 - Never logs a prompt, a fixture's untrusted-notes text, or the API key —
   only safe structural metadata (provider name, model, duration,
-  valid/invalid, error category/count).
+  valid/invalid, error category/count). The underlying SDK client itself
+  also has its own request/response logging forced off
+  (`logLevel: "off"`, overriding the ambient `OPENAI_LOG` environment
+  variable) — see "Mock vs. live AI" in `README.md`.
 - Writes its own JSON report to `evals/.output/live-report.json`
   (gitignored) and never auto-commits or auto-summarizes anything —
   producing `docs/EVAL_RESULTS.md` is a deliberate, separate, human step.

@@ -521,16 +521,37 @@ request timeout are both explicitly disabled/bounded at client construction
 always equals exactly one HTTP request; the orchestration service's own
 "at most two attempts total" cap (below) is the only thing that ever
 issues a second request, and a timeout is classified and retried through
-the same transient-provider-failure path as any other transient error.
-Every live request also carries a server-controlled `max_output_tokens`
-ceiling (`IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS = 8192`, covering both visible
-output and reasoning tokens) — a response truncated by that ceiling is
-never treated as successful; it's classified as a retryable
-`INCOMPLETE_OUTPUT` failure instead. Both constants apply identically to
-production analyses and `npm run eval:live`, since both go through this
-same provider class — see `docs/DECISIONS.md`, "Phase 6 correction:
-provider-spend and output-bounds", and `docs/THREAT_MODEL.md`,
+the same transient-provider-failure path as any other transient error. The
+same client construction also forces `logLevel: "off"`
+(`OPENAI_SDK_LOG_LEVEL`), overriding the ambient `OPENAI_LOG` environment
+variable unconditionally — the SDK's own `debug`/`info` log levels print
+full request/response bodies (including the prompt's embedded untrusted
+supplier text and the model's raw output), and this application never
+depends on a developer or deployment environment remembering to leave
+that variable unset. Every live request also carries a server-controlled
+`max_output_tokens` ceiling (`IMPACT_ANALYSIS_MAX_OUTPUT_TOKENS = 8192`,
+covering both visible output and reasoning tokens) — a response truncated
+by that ceiling is never treated as successful; it's classified as a
+retryable `INCOMPLETE_OUTPUT` failure instead. These constants apply
+identically to production analyses and `npm run eval:live`, since both go
+through this same provider class — see `docs/DECISIONS.md`, "Phase 6
+correction: provider-spend and output-bounds", and `docs/THREAT_MODEL.md`,
 "Denial-of-wallet."
+
+**Only a genuinely completed response is ever parsed.** A single
+`assertOpenAiResponseCompleted()` gate sits between the raw SDK response
+and `JSON.parse()` — `response.output_text` is never read anywhere else.
+An explicit model refusal (detected from the response's own output
+content, checked first) or a `content_filter`-truncated response both
+throw a non-retryable `PROVIDER_REFUSAL`; a `max_output_tokens`-truncated
+response throws retryable `INCOMPLETE_OUTPUT`; any other non-`"completed"`
+status (`failed`, `cancelled`, an unrecognized `incomplete` reason, or
+simply an unexpected/missing status) is rejected as a safe provider
+failure — never parsed, never accepted, regardless of what
+`response.output_text` happens to contain. No thrown error ever includes
+the refusal text, the truncated output, or any other response-derived
+content. See `docs/DECISIONS.md`, "Phase 6 correction:
+provider-terminal-state and validation-error safety."
 
 Every attempt's output — from either provider — passes a pre-validation
 total-size guard (`MAX_PROVIDER_OUTPUT_BYTES = 65,536` — rejects an
@@ -546,23 +567,32 @@ structurally "valid" response can never fail at the actual write), then
 semantically against the request's own model input (every cited source ID
 must exist in the supplied evidence allowlist; the reported schedule/budget
 exposure must exactly equal the deterministic value already computed).
-Every validation-failure message describes a field path or array index
-only (e.g. `"sourceRecordIds[2] is not in the supplied evidence
-allowlist."`) — it never echoes back the invalid ID, an option title, or
-any other provider-controlled value, since these messages are both
-persisted (`ImpactAnalysis.validationErrors`) and fed back to the provider
-as retry guidance; a shared sanitizer additionally caps the number of
-errors, each error's length, and the total feedback size before either use
+Every validation-failure message — structural or semantic — describes a
+field path or array index and, where useful, a schema-authored limit only
+(e.g. `"sourceRecordIds[2] is not in the supplied evidence allowlist."`,
+`"assumptions[0]: value exceeds the maximum permitted length of 500
+character(s)."`) — never Zod's own default issue message (which, for an
+unrecognized-property violation, embeds the offending property's own
+_name_), the invalid value itself, an option title, or any other
+provider-controlled content, since these messages are both persisted
+(`ImpactAnalysis.validationErrors`) and fed back to the provider as retry
+guidance. A shared sanitizer additionally caps the number of errors, each
+error's length, and the _true serialized_ feedback size
+(`Buffer.byteLength(JSON.stringify(errors), "utf8")`, not merely the sum
+of each raw string's own bytes — the actual persisted/retried form is
+larger once JSON's structural overhead and escape-sequence expansion are
+counted) before either use
 (`packages/core/src/ai/validate-provider-output.ts`). On a retryable
 failure (malformed JSON, schema violation, invalid citation, deterministic
 mismatch, incomplete/truncated output, transient provider error), the
 orchestration service retries exactly once with concise, redacted
-validation feedback; a configuration failure (missing key/model) is never
-retried. A **persistence** failure — the provider responded correctly, but
-writing the result to the database failed — is a separate, non-retryable
-category (`PERSISTENCE_FAILURE`): the provider is never called a second
-time to compensate for an application-side write failure. See
-`docs/SPEC.md` §9–10 and `docs/ARCHITECTURE.md`.
+validation feedback; a configuration failure (missing key/model) or a
+provider refusal is never retried. A **persistence** failure — the
+provider responded correctly, but writing the result to the database
+failed — is a separate, non-retryable category (`PERSISTENCE_FAILURE`):
+the provider is never called a second time to compensate for an
+application-side write failure. See `docs/SPEC.md` §9–10 and
+`docs/ARCHITECTURE.md`.
 
 ## Limitations
 
