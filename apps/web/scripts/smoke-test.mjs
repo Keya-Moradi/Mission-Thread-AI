@@ -71,6 +71,7 @@ const SEEDED_MITIGATION_OPTION_ID = "MIT-EVT-SUPPLIER-001-1";
 // oldValue in this script, never mutated (applyApprovedChanges() is
 // deliberately never called here — see "Phase 5 approval workflow" below).
 const SEEDED_MILESTONE_ID = "MS-001";
+const SEEDED_COMPONENT_ID = "COMP-EC440";
 
 let failureCount = 0;
 
@@ -652,6 +653,47 @@ async function main() {
       check(
         "Engineering Lead sees no Apply control (read-only)",
         !applyAsLeadHtml.includes("Apply changes"),
+      );
+      console.log("\nPhase 7 digital-thread graph — unauthenticated access:");
+      const threadUnauth = await fetch(`${BASE_URL}/programs/edgelink-x/thread`, {
+        redirect: "manual",
+      });
+      checkRedirectToLogin("GET /programs/edgelink-x/thread", threadUnauth);
+
+      console.log("\nPhase 7 digital-thread graph — renders for all 3 roles:");
+      const threadAsPm = await fetch(`${BASE_URL}/programs/edgelink-x/thread`, {
+        headers: { Cookie: jar.header() },
+      });
+      const threadAsPmHtml = await threadAsPm.text();
+      check("Program Manager can view the thread graph (200)", threadAsPm.status === 200);
+      check("thread page renders the graph heading", threadAsPmHtml.includes("Digital thread"));
+      check(
+        "thread page renders the accessible non-canvas fallback",
+        threadAsPmHtml.includes("Thread records and relationships"),
+      );
+      check(
+        "thread page shows a seeded component by record ID",
+        threadAsPmHtml.includes(SEEDED_COMPONENT_ID),
+      );
+      check(
+        "thread page shows the seeded analysis run",
+        threadAsPmHtml.includes(SEEDED_ANALYSIS_RUN_ID),
+      );
+      check("thread page never exposes a password hash", !threadAsPmHtml.includes("passwordHash"));
+
+      const threadAsLead = await fetch(`${BASE_URL}/programs/edgelink-x/thread`, {
+        headers: { Cookie: leadJar.header() },
+      });
+      check("Engineering Lead can view the thread graph (200)", threadAsLead.status === 200);
+
+      const threadAsExec = await fetch(`${BASE_URL}/programs/edgelink-x/thread`, {
+        headers: { Cookie: execJar.header() },
+      });
+      const threadAsExecHtml = await threadAsExec.text();
+      check("Executive Viewer can view the thread graph (200)", threadAsExec.status === 200);
+      check(
+        "thread page has no mutation form beyond the shared sign-out form (read-only)",
+        (threadAsExecHtml.match(/<form/g) ?? []).length === 1,
       );
     } finally {
       await fixtures.cleanup([pendingOptionId, approvedOptionId]);

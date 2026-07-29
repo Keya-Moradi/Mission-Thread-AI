@@ -15,26 +15,35 @@ program, customer, classified system, or export-controlled detail.
 
 ## Project status
 
-**Phase 6 of 8 (Security and evaluations) — complete.** Workspaces, database
-schema, deterministic seed data, authentication, the full deterministic
-program-analysis service layer (`packages/core/src/analysis`), a real
-database-driven dashboard/program overview/event-entry form/audit shell,
-a full AI impact-analysis pipeline (`packages/core/src/ai`), the complete
-human approval/apply workflow (`packages/core/src/approvals`), and now a
-full threat model, strengthened/testable prompt-injection boundaries, an
-in-memory analysis rate limiter (`packages/core/src/security`), a
-deterministic mock evaluation suite (`evals/`), and a guarded (not yet
-executed) live-evaluation command all exist and are verified working. A
-Program Manager can record a supplier-delay or general-update event,
-trigger an impact analysis on it (rate-limited to 3 requests per 60
-seconds per actor), and — once it succeeds — record a decision (approve
-with structured proposed changes, reject, or request revision) on each of
-the three mitigation options; an Engineering Lead may request revision. An
+**Phase 7 of 8 (Digital-thread graph and MCP server) — complete.**
+Workspaces, database schema, deterministic seed data, authentication, the
+full deterministic program-analysis service layer
+(`packages/core/src/analysis`), a real database-driven dashboard/program
+overview/event-entry form/audit shell, a full AI impact-analysis pipeline
+(`packages/core/src/ai`), the complete human approval/apply workflow
+(`packages/core/src/approvals`), a full threat model, strengthened/testable
+prompt-injection boundaries, an in-memory analysis rate limiter
+(`packages/core/src/security`), a deterministic mock evaluation suite
+(`evals/`), a guarded (not yet executed) live-evaluation command, a
+database-driven, read-only React Flow digital-thread graph
+(`/programs/edgelink-x/thread`), and a local, read-only MCP server
+(`packages/mcp-server`) all exist and are verified working. A Program
+Manager can record a supplier-delay or general-update event, trigger an
+impact analysis on it (rate-limited to 3 requests per 60 seconds per
+actor), and — once it succeeds — record a decision (approve with
+structured proposed changes, reject, or request revision) on each of the
+three mitigation options; an Engineering Lead may request revision. An
 approval is reviewed on a read-only apply-preview page (old vs. proposed
 values, stale-data warnings) before a Program Manager types an exact
 confirmation and applies it, transactionally and atomically, to the real
 milestone, risk, or budget data — every step producing an append-only audit
-record. See [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md),
+record. Any of the three roles can explore the whole program as a graph —
+components, requirements, milestones, risks, tests, defects, budget items,
+events, analysis runs, mitigation options, decisions, and applied changes,
+with evidence citations shown as edges — and a local operator can point an
+MCP client (e.g. Claude Desktop) at `packages/mcp-server` for six bounded,
+read-only queries over the same data. See
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md),
 [Phase roadmap](#phase-roadmap), and [Limitations](#limitations) below.
 
 Development follows a phase-gated process defined in
@@ -285,6 +294,8 @@ npm run smoke:test     # build + automated end-to-end smoke test
 npm run test:e2e       # build + Playwright happy-path test (non-destructive — see below)
 npm run eval:mock       # deterministic, offline AI-pipeline evaluation suite (see evals/README.md)
 npm run eval:live       # guarded live-provider evaluation — requires explicit opt-in, see below
+npm run test:mcp        # Vitest tests for the read-only MCP server (packages/mcp-server)
+npm run mcp:stdio       # build + start the local read-only MCP server over stdio
 ```
 
 `smoke:test` builds the production app, then runs
@@ -357,9 +368,21 @@ this repository — Phase 8 owns the one authorized, sanitized
 live-evaluation run and `docs/EVAL_RESULTS.md`. See
 [`evals/README.md`](evals/README.md).
 
-All of the above except `test:e2e`, `eval:mock`, and `eval:live` are run in
-CI (`.github/workflows/ci.yml`) with `AI_MODE=mock`, so the pipeline never
-needs a live model API key.
+`test:mcp` runs `packages/mcp-server`'s Vitest suite — like `packages/core`'s
+own tests, it connects only to `missionthread_test` (validated before Prisma
+is ever imported; see `packages/mcp-server/src/test/setup-env.ts`) and never
+resets or seeds the database itself. Every test only reads: run it as many
+times in a row as you like with no reset in between. `mcp:stdio` builds a
+real `dist/index.js` (via esbuild — see `docs/DECISIONS.md`) and starts it
+connected to stdio; it's meant to be pointed at by a local MCP client's own
+configuration (e.g. Claude Desktop's `claude_desktop_config.json`), not run
+interactively on its own — stdio is reserved for MCP protocol messages, so a
+bare terminal invocation will just sit there exchanging JSON-RPC with
+nothing.
+
+All of the above except `test:e2e`, `eval:mock`, `eval:live`, and `test:mcp`
+are run in CI (`.github/workflows/ci.yml`) with `AI_MODE=mock`, so the
+pipeline never needs a live model API key.
 
 ## Current routes and functionality (Phase 5)
 
@@ -432,6 +455,16 @@ needs a live model API key.
   (title, description, due date, applied date) — the applied
   `ProposedChange` row itself is the durable record for this MVP; there is
   no separate action-tracking table.
+- `/programs/edgelink-x/thread` — **Phase 7.** A read-only, database-driven
+  React Flow graph of the whole program: components, requirements,
+  milestones, risks, suppliers, tests, defects, budget items, events,
+  analysis runs, mitigation options, decisions, and applied changes, with
+  evidence citations shown as edges. All 3 roles. Strictly read-only —
+  `nodesDraggable`/`nodesConnectable` are both `false`, there is no
+  connect/delete/save/mutation control anywhere — with search, node-kind
+  filters, a citation-edge toggle, a legend, a selected-node detail panel,
+  and an accessible non-canvas fallback listing every node and edge as
+  plain text below the canvas.
 
 Every decision and apply action produces its own append-only audit
 record (`DECISION_RECORDED`, `CHANGES_APPLIED`), visible on `/audit`.
@@ -596,7 +629,7 @@ application-side write failure. See `docs/SPEC.md` §9–10 and
 
 ## Limitations
 
-- **Phase 1–6 build.** The deterministic program-logic services
+- **Phase 1–7 build.** The deterministic program-logic services
   (traceability, dependency chains, verification gaps, related defects,
   schedule/budget exposure, risk scoring, readiness scoring, bounded
   evidence assembly) exist in `packages/core/src/analysis`, a real
@@ -605,11 +638,28 @@ application-side write failure. See `docs/SPEC.md` §9–10 and
   (`packages/core/src/ai`) produces persisted, validated mitigation
   options, the complete human approval/apply workflow
   (`packages/core/src/approvals`) takes an approved option through a
-  transactional, audited domain mutation, and a full threat model,
+  transactional, audited domain mutation, a full threat model,
   strengthened prompt-injection tests, an in-memory analysis rate limiter,
   and a mock evaluation suite (`docs/THREAT_MODEL.md`,
-  `packages/core/src/security`, `evals/`) now exist. React Flow, MCP, and
-  a live-eval run are Phase 7+.
+  `packages/core/src/security`, `evals/`) exist, and now a read-only React
+  Flow digital-thread graph (`packages/core/src/thread`,
+  `/programs/edgelink-x/thread`) and a local read-only MCP server
+  (`packages/mcp-server`) exist. A live-eval run is Phase 8.
+- **The MCP server has been verified manually against a real local MCP
+  client, but never through a third-party MCP host (Claude Desktop, an
+  IDE integration, etc.) in this repository.** Verification here means: a
+  built `dist/index.js` spawned as a real child process, driven through a
+  full `initialize` → `tools/list` → `tools/call` round trip using the
+  same SDK's own `StdioClientTransport`, plus an in-memory protocol-level
+  test in the automated suite. Connecting a specific third-party host is a
+  local operator's own setup step, not something this repository's test
+  suite can exercise. See `docs/THREAT_MODEL.md`'s "MCP host/client/
+  server/database boundary" for the trust model that setup step inherits.
+- **The MCP server has no dedicated read-only database credential.** It
+  connects with the same `DATABASE_URL` `apps/web` uses; its read-only
+  behavior is enforced entirely at the application layer (no tool
+  performs a write, verified by both code review and tests), not by a
+  database-level permission grant. See `docs/THREAT_MODEL.md`.
 - **`NEW_ACTION` proposed changes have no dedicated domain table.** For
   this MVP, an applied `NEW_ACTION`'s own `ProposedChange` row (its
   `newValue` JSON) is the durable record, surfaced only in the program
@@ -655,13 +705,20 @@ application-side write failure. See `docs/SPEC.md` §9–10 and
 - **The Playwright end-to-end suite is not wired into CI yet** — it's a
   local/manual check (`npm run test:e2e`) for now; Phase 8 owns full CI
   browser-test expansion.
+- **`test:mcp` is not wired into CI either**, deliberately, matching the
+  same reasoning as Playwright above — it's a local/manual check
+  (`npm run test:mcp`) for now.
 - **Mock evals demonstrate pipeline and policy behavior, not general
   live-model quality** — `npm run eval:mock` proves the pipeline's
   deterministic/structural/semantic rules hold, not that a real model
   produces good narrative output; that's `eval:live`'s job, which has not
   been run in this repository yet. See `evals/README.md`.
-- **Remaining npm audit findings** — as of this correction pass, `npm audit`
-  reports 16 findings (1 moderate, 15 high): the previously-documented
+- **Remaining npm audit findings** — as of Phase 7, `npm audit` still
+  reports the same 16 findings (1 moderate, 15 high) as the prior Phase 6
+  pass; none of Phase 7's added dependencies (`@xyflow/react`,
+  `@modelcontextprotocol/sdk`, `esbuild`, and `packages/mcp-server`'s own
+  `zod`/`dotenv`/`tsx`/`vitest`) introduced a new advisory. The
+  previously-documented
   `@prisma/dev` transitive `find-my-way`/`valibot` chain (optional
   `prisma dev` local-tooling dependency, never invoked anywhere in this
   repository) and Next.js's internally bundled `postcss`/`sharp` copies
@@ -692,7 +749,7 @@ application-side write failure. See `docs/SPEC.md` §9–10 and
 | **4** | **AI impact analysis (LLMProvider, mock/live, structured output, retry) — done**              |
 | **5** | **Approval and audit (state machine, apply preview, transactional apply, audit) — done**      |
 | **6** | **Security and evals (threat model, prompt-injection defenses, rate limiter, evals) — done**  |
-| 7     | Graph and MCP (React Flow thread view, read-only MCP server)                                  |
+| **7** | **Graph and MCP (React Flow thread view, read-only MCP server) — done**                       |
 | 8     | Delivery (full CI, Docker, browser tests, live eval, polish)                                  |
 
 Full detail: [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).

@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 const NAV_LINKS = [
   { href: "/", label: "Dashboard" },
   { href: "/programs/edgelink-x", label: "EdgeLink-X" },
+  { href: "/programs/edgelink-x/thread", label: "Thread" },
   { href: "/audit", label: "Audit" },
 ];
 

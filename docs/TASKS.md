@@ -651,6 +651,175 @@ dated 2026-07-27.
       controls were not redesigned; Phases 1–5 were not reopened; no
       Phase 7 functionality was added.
 
-## Phase 7 — Graph and MCP (not started)
+## Phase 7 — Graph and MCP — done (2026-07-29)
+
+A database-driven digital-thread graph (`/programs/edgelink-x/thread`) and a
+local, read-only MCP server (`packages/mcp-server`), both reusing
+`packages/core`'s existing deterministic services. Full disposition is in
+`docs/DECISIONS.md`'s "(Phase 7)" entry and `docs/THREAT_MODEL.md`'s new
+"MCP host/client/server/database boundary" section.
+
+- [x] `packages/core/src/thread/` — `buildProgramThread(programId)`
+      returns a `ServiceResult<ProgramThreadGraph>`; fixed 14-value
+      `ThreadNodeKind`/16-value `ThreadEdgeKind` discriminated unions;
+      deterministic node/edge IDs; bounded labels/metadata (never
+      `passwordHash`, session/provider data, `ProgramEvent.reason`/
+      `rawNotes`, or a complete `Decision.rationale`); `ImpactAnalysis`
+      attempts grouped into one `ANALYSIS_RUN` node per `analysisRunId`
+      (terminal = highest attempt; mitigation options linked only for a
+      `SUCCEEDED` terminal); evidence citations reused from
+      `SourceReference.wasCited` (a cited `DEPENDENCY` marks its matching
+      `DEPENDS_ON` edge's metadata instead of inventing a node); a generic
+      BFS-from-`PROGRAM` orphan-connection pass instead of per-relationship
+      special-casing; `validateGraphInvariants()` (unique IDs, no duplicate
+      logical edges, no dangling/self edges, size bounds) re-checked before
+      every return, failing safe with `VALIDATION_ERROR` rather than ever
+      returning a partial graph. Never imports React Flow or the MCP SDK.
+- [x] `apps/web/.../programs/edgelink-x/thread/` — `thread-layout.ts`
+      (pure, deterministic column-per-kind layout, no dagre/ELK, no
+      runtime import from `@missionthread/core` beyond `import type`);
+      `page.tsx` (server, `requireSession()` only, all 3 roles, safe error
+      state); `thread-graph.tsx` (client, strictly read-only React Flow:
+      `nodesDraggable={false}`, `nodesConnectable={false}`,
+      `deleteKeyCode={null}`, no `onConnect`/mutation action anywhere;
+      legend, live counts, search, domain/workflow/citation filters, Reset
+      view, selected-node detail panel); `thread-node.tsx`/
+      `thread-details.tsx`/`thread-filters.tsx`; an accessible `<details>`
+      "Thread records and relationships" fallback below the canvas
+      (node list by kind + edge list, plain server-rendered HTML). "Thread"
+      nav link (all roles) and a "View digital thread" link from the
+      program overview.
+- [x] `@xyflow/react@12.11.2` installed; stylesheet imported in
+      `apps/web/src/app/globals.css` directly after `@import "tailwindcss";`,
+      never from a component. A real dev-server build error (Turbopack
+      failing to resolve `tls`/`util/types` because a client file had
+      imported a runtime value, not just a type, from `@missionthread/core`'s
+      root barrel — which also re-exports `./db`) was caught and fixed
+      during manual verification; see `docs/DECISIONS.md`.
+- [x] `packages/core/src/thread/build-program-thread.test.ts` — 21 tests:
+      pure `validateGraphInvariants()` cases (valid graph, duplicate
+      node/edge ID, dangling endpoint, self-edge — all DB-free) plus
+      DB-backed cases against the seeded program (not found, malformed ID,
+      builds successfully, deterministic repeated-call ordering, unique
+      IDs, no duplicate logical edges, dependency direction preserved,
+      retry-attempts collapse to one `ANALYSIS_RUN` node with the correct
+      terminal, a `FAILED`-terminal run has zero linked options, citations
+      produce `CITED` edges, a cited `DEPENDENCY` marks edge metadata
+      instead of a node, `MILESTONE_DATE` targets correctly / `NEW_ACTION`
+      never gets a fake `TARGETS` edge, every node reachable from
+      `PROGRAM`, no unsafe fields, decision rationale never appears in
+      full). `apps/web/.../thread-layout.test.ts` — 9 pure tests
+      (determinism, order-independence, root placement, left-to-right
+      flow, same-kind row ordering, shared-column non-collision, no
+      NaN/negative, empty input, exact column width).
+- [x] `apps/web/scripts/smoke-test.mjs` extended: unauthenticated redirect
+      to `/login`; all 3 roles get 200; graph heading, accessible
+      fallback, a seeded component ID, the seeded analysis run, and no
+      `passwordHash` all present; exactly one `<form>` (the shared
+      sign-out form) — no mutation form for any role. Non-destructive.
+- [x] `packages/core/src/mcp/` — six framework-independent read services
+      (`get-program-summary`, `get-requirement`, `get-schedule-dependencies`,
+      `list-failed-tests`, `get-budget-variance`, `get-risk-register`),
+      reusing `calculateBudgetVariance`/`calculateReadinessScore`/
+      `getDependencyChain`/`getVerificationGaps`/`getRelatedDefects`/
+      `computeRiskScore` wherever one already existed; strict `.strict()`
+      Zod input schemas (`schemas.ts`); shared `MCP_LIMITS`
+      (`maxRecords: 100`, `maxDependencyDepth: 10`,
+      `defaultDependencyDepth: 5`, `maxTextLength: 300`); never imports the
+      MCP SDK. `packages/core/src/mcp/mcp-services.test.ts` — 18 tests
+      covering not-found/validation errors, seeded totals matching the
+      Phase 2 services exactly, FAILED-only filtering, fixed-two-decimal
+      budget amounts, and risk-score/sort-order correctness.
+- [x] `packages/mcp-server/` — `@modelcontextprotocol/sdk@1.30.0` (stable
+      v1), stdio only. `server.ts` exports `createMissionThreadMcpServer()`
+      (registers exactly the six SPEC.md §15 tools, factual one-sentence
+      descriptions, `readOnlyHint: true`/`destructiveHint: false`
+      annotations, never connects a transport). `index.ts` is the only
+      file that constructs `StdioServerTransport` and calls
+      `server.connect()`; owns `SIGINT`/`SIGTERM` → clean Prisma
+      disconnect, and the one safe stderr message + nonzero exit on
+      startup failure. `tool-result.ts` maps every `ServiceResult<T>` to
+      `{ content: [{ type: "text", text }] }`, enforces a 32,000-byte
+      output ceiling, and discards any thrown exception's message/stack
+      (a raw Prisma error can never reach a client). No `console.log`
+      anywhere in the package (stdout is protocol-only).
+- [x] `packages/mcp-server/build.mjs` — esbuild bundles this package's own
+      source together with `@missionthread/core`'s source (which uses
+      extensionless imports, unloadable by plain Node) into one
+      self-contained `dist/index.js`, keeping real npm dependencies
+      (`@prisma/client`, `@prisma/adapter-pg`, `pg`, `openai`,
+      `@modelcontextprotocol/sdk`, `zod`) external. `npm run start` runs
+      the real emitted build; `npm run dev` uses `tsx watch` for
+      iteration; `tsconfig.json`'s `moduleResolution` changed from the
+      placeholder's `NodeNext` to `bundler` (matching `packages/core`'s
+      own) so `tsc --noEmit` can resolve `@missionthread/core`'s types at
+      all. Manually verified end-to-end: built `dist/index.js`, spawned it
+      as a real child process via the MCP SDK's own `StdioClientTransport`,
+      completed a live `initialize` → `tools/list` → `tools/call
+get_program_summary` round trip against the real seeded database.
+- [x] `packages/core/package.json` gained one new narrow subpath export,
+      `"./test-db-config"` (alongside the existing `"./db-safety"`), so
+      `packages/mcp-server`'s own Vitest setup could reuse the exact same
+      `resolveTestDatabaseConfiguration()` logic `packages/core`'s test
+      suite already uses, without a fragile deep relative cross-package
+      import or duplicated logic.
+- [x] `packages/mcp-server/src/server.test.ts` (16 tests) and
+      `read-only-boundary.test.ts` (7 tests) — 23 total: exact 6-tool set
+      and names; `readOnlyHint`/`destructiveHint` annotations; no
+      instruction-like phrase in any description (both a protocol-level
+      check and a static source-text check); unknown input fields rejected
+      at the protocol layer before the handler runs; padded IDs and
+      missing entities return safe `isError` results, never a raw
+      exception; bounded/correct/deterministic output for all six tools
+      (readiness/budget figures match the Phase 2 services exactly,
+      requirement relationships complete, dependency direction + maxDepth
+      ceiling enforced, failed-tests excludes PASSED/BLOCKED/NOT_RUN,
+      budget amounts are fixed-two-decimal strings, risk scores match
+      `calculateRiskScore()` exactly); one required protocol-level test
+      using `InMemoryTransport.createLinkedPair()` (initialize → list
+      tools → call `get_program_summary`, 5s internal timeout, no network
+      request); a zero-mutation test comparing 9 table row counts before
+      and after calling all six tools; static source scans proving no raw
+      SQL, no shell/filesystem access, no mutation-function import, no AI
+      provider import, no `OPENAI_API_KEY` read, and no `console.log`
+      anywhere in the package's source.
+- [x] Root `package.json` gained `mcp:stdio` (build + start) and
+      `test:mcp` (`npm run test --workspace @missionthread/mcp-server`) —
+      confirmed non-destructive and repeatable: run once immediately after
+      a fresh `db:reset:test`, then run again with no reset in between;
+      identical 9-table row-count snapshot before and after both runs.
+- [x] `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/THREAT_MODEL.md`
+      (new MCP host/client/server/database trust-boundary section with a
+      Mermaid diagram, local-trust-boundary statement, and tool-poisoning
+      considerations), this file, and `README.md` updated.
+- [x] Full non-destructive quality gate: `node -v`, `npm ci`,
+      `db:validate`, `db:generate` (no new migration — none was needed or
+      added), `lint`, `format:check`, `typecheck`, `test` (45 web + 730
+      core + 23 mcp = **798 total**, all passing), `build`, `smoke:test`
+      (**87/87 checks**, including the 9 new Phase 7 checks), `eval:mock`
+      (8/8 scenarios, 12/12 metrics — unchanged from the Phase 6
+      baseline), `test:mcp`, `build --workspace @missionthread/mcp-server`
+      — all green. `eval:live` was not run; no live OpenAI request was
+      made at any point in this phase. `npm audit --json`: **16 findings
+      (1 moderate, 15 high)** — identical package chains and disposition
+      to the prior Phase 6 pass (the `eslint`/`eslint-config-next` chain,
+      `@prisma/dev`/`find-my-way`/`valibot`, and `next`-bundled
+      `postcss`/`sharp`); no new advisory was introduced by any Phase 7
+      dependency (`@xyflow/react`, `@modelcontextprotocol/sdk`, `esbuild`,
+      `zod`, `dotenv`, `tsx`, `vitest` for `mcp-server`); `npm audit fix
+--force` was not run. Fresh `AskUserQuestion` authorization obtained
+      for `db:reset:test` specifically; Prisma's AI-agent consent
+      guardrail fired as expected and was honored (rerun with
+      `PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION` set to the user's own
+      consent text), never bypassed. `db:reset:test` then `test:e2e`
+      (1/1) then `test:e2e` again with no further reset (1/1), confirming
+      repeatability — matching Phase 6's own pattern. Confirmed throughout:
+      the graph route performs no mutation (existing repo-wide
+      `security-boundary.test.ts` scan, which now also covers
+      `thread/page.tsx`); MCP exposes exactly six read tools and zero
+      write tools; MCP performs zero database mutations; no Prisma
+      migration was added; Phases 1–6 were not reopened; no Phase 8
+      functionality (CI expansion, Docker completion, browser
+      screenshots, the one authorized live-eval run) was added.
 
 ## Phase 8 — Delivery (not started)

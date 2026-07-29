@@ -34,3 +34,5 @@ export * from "./events";
 export * from "./ai";
 export * from "./approvals";
 export * from "./security";
+export * from "./thread";
+export * from "./mcp";

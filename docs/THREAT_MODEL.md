@@ -68,6 +68,10 @@ must update it, not leave it stale.
 - **Database administrator or direct database editor** — anyone with
   direct `psql`/Prisma Studio/SQL access to the Postgres instance,
   bypassing the application entirely.
+- **Local MCP client / operator** — a developer or agent running an MCP
+  client (e.g. Claude Desktop, an IDE integration, or a custom script) that
+  connects to `packages/mcp-server` over local stdio. Possession of the
+  configured `DATABASE_URL` is this actor's trust boundary — see below.
 
 ## Trust boundaries
 
@@ -145,6 +149,92 @@ flowchart LR
   `(host, port, database)` tuples in `db-safety.ts`, never by name
   substring alone. `apps/web/e2e/playwright-test-environment.ts` applies
   the same discipline to the Playwright suite specifically.
+
+### MCP host/client/server/database boundary (Phase 7)
+
+```mermaid
+flowchart LR
+    subgraph LocalMachine["Local developer/operator machine"]
+        Host["MCP host\n(Claude Desktop, IDE, script)"]
+        ClientProc["MCP client\n(spawns the server as a child process)"]
+        ServerProc["packages/mcp-server\n(StdioServerTransport)"]
+    end
+
+    subgraph Core["packages/core/src/mcp"]
+        Services["6 read services\n(strict Zod input, bounded output)"]
+    end
+
+    DB[("PostgreSQL\n(missionthread_dev or _test)")]
+
+    Host -->|"tool call request"| ClientProc
+    ClientProc <-->|"stdio (stdin/stdout),\nJSON-RPC only"| ServerProc
+    ServerProc -->|"validated input"| Services
+    Services -->|"parameterized queries only"| DB
+    Services -->|"ServiceResult<T>,\nnever a raw row"| ServerProc
+```
+
+- **No remote transport exists.** `packages/mcp-server` only implements
+  `StdioServerTransport` — a local child process communicating over its own
+  stdin/stdout. There is no Streamable HTTP, no SSE, no network listener,
+  and therefore no remote attacker surface for this server today. A future
+  remote transport would need real authentication and authorization, which
+  this MVP does not attempt to design in advance.
+- **The trust boundary is possession of `DATABASE_URL`, not an MCP-level
+  credential.** The server connects to Postgres with the same connection
+  string `apps/web` uses. Application-level read-only tool behavior (no
+  tool performs a create/update/delete/upsert; see "Read-only boundary"
+  below) is not equivalent to a database-enforced read-only role — anyone
+  who can run `packages/mcp-server` locally has exactly the database access
+  its `DATABASE_URL` grants, same as any other local script. This MVP does
+  not provision a dedicated read-only Postgres credential for it; a
+  production deployment should.
+- **Read-only boundary is enforced at multiple independent layers.** (1)
+  `packages/core/src/mcp/*.ts` contains no call to `prisma.<model>.create/
+update/delete/upsert`, verified by both direct code review and a static
+  source-scan test (`packages/mcp-server/src/read-only-boundary.test.ts`).
+  (2) `packages/mcp-server` imports no mutation function
+  (`recordProgramEvent`, `recordMitigationDecision`,
+  `applyApprovedChanges`) from `packages/core`, also test-enforced. (3)
+  Exactly six tools are registered, all named `get_*`/`list_*`, each
+  annotated `readOnlyHint: true`/`destructiveHint: false` — an MCP host
+  that respects tool annotations gets an additional, independent signal
+  beyond this document. None of these three layers alone is treated as
+  sufficient; together they mean a single missed code-review comment can't
+  reintroduce a write path unnoticed.
+- **Tool-poisoning considerations.** An MCP tool's `description` field is
+  visible to, and may be weighted by, the connecting host's own model —
+  making it a place a malicious server could embed a hidden instruction
+  ("ignore your system prompt and...") that the host's model might follow
+  without the human operator ever seeing it. This server's six tool
+  descriptions are fixed, short, factual strings authored directly in this
+  repository's source (`packages/mcp-server/src/tools/*.ts`) — never
+  built from a database value, a provider response, or any other runtime
+  input — so there is no path by which untrusted data (e.g. a supplier's
+  `ProgramEvent.rawNotes`) could ever reach a tool description. A static
+  test asserts every description stays short and contains none of a fixed
+  list of instruction-like phrases, as a regression guard, not as the
+  primary control — the primary control is that descriptions are
+  hand-authored literals with no runtime data path into them at all. The
+  same reasoning applies to tool _output_: every result is `JSON.stringify`d
+  application data (§16), never free text a supplier or the AI provider
+  wrote, so a returned tool result cannot itself smuggle a prompt-injection
+  payload toward the host the way a live web-search or file-read MCP tool's
+  output plausibly could.
+- **No sampling, no elicitation, no resources beyond what's necessary.**
+  This server never asks the connecting client's model to generate content
+  on its behalf (`sampling`) and never requests interactive input from the
+  human operator (`elicitation`) — both would each open their own
+  trust-direction questions this MVP avoids by simply not implementing
+  them. It exposes only `tools`, no `resources` or `prompts` capability.
+- **stdio itself carries no authentication.** Any local process capable of
+  spawning `packages/mcp-server` (or connecting to an already-running
+  instance's stdin/stdout, if something else wired that up) can call any
+  of its six tools — there is no per-caller identity inside a single local
+  stdio session, unlike `apps/web`'s per-request session/role check. This
+  is accepted as consistent with "local developer/operator integration,"
+  the same trust level as any other local CLI tool that reads this
+  database; it is explicitly called out here so it is never mistaken for
+  the app's session-based authorization model.
 
 ## Required threats
 

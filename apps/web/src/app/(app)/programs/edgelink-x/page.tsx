@@ -227,14 +227,22 @@ export default async function ProgramOverviewPage({
           </h1>
           <p className="mt-1 max-w-3xl text-sm text-muted">{data.program?.description}</p>
         </div>
-        {isProgramManager && (
+        <div className="flex shrink-0 items-center gap-2">
           <Link
-            href="/programs/edgelink-x/events/new"
-            className="shrink-0 rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-foreground transition-opacity hover:opacity-90"
+            href="/programs/edgelink-x/thread"
+            className="rounded-md border border-border bg-surface px-3 py-2 text-sm font-medium text-foreground transition-opacity hover:opacity-90"
           >
-            Record event
+            View digital thread
           </Link>
-        )}
+          {isProgramManager && (
+            <Link
+              href="/programs/edgelink-x/events/new"
+              className="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-foreground transition-opacity hover:opacity-90"
+            >
+              Record event
+            </Link>
+          )}
+        </div>
       </div>
 
       {/* Components */}

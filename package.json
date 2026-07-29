@@ -30,7 +30,9 @@
     "test:e2e": "npm run build --workspace @missionthread/web && npm run test:e2e --workspace @missionthread/web",
     "test:e2e:reset:test:destructive": "npm run db:reset:test && npm run test:e2e",
     "eval:mock": "tsx evals/run-mock.ts",
-    "eval:live": "tsx evals/run-live.ts"
+    "eval:live": "tsx evals/run-live.ts",
+    "test:mcp": "npm run test --workspace @missionthread/mcp-server",
+    "mcp:stdio": "npm run build --workspace @missionthread/mcp-server && npm run start --workspace @missionthread/mcp-server"
   },
   "devDependencies": {
     "eslint": "^9",
