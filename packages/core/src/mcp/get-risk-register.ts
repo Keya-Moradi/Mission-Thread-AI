@@ -2,7 +2,7 @@ import { prisma } from "../db";
 import { notFound, ok, validationError, type ServiceResult } from "../analysis/types";
 import { computeRiskScore } from "../analysis/risk";
 import { riskRegisterInputSchema } from "./schemas";
-import { MCP_LIMITS } from "./types";
+import { boundMcpText, MCP_LIMITS } from "./types";
 import type { RiskRegisterEntry } from "./types";
 
 const SEVERITY_RANK: Record<string, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
@@ -38,7 +38,7 @@ export async function getRiskRegister(input: unknown): Promise<ServiceResult<Ris
 
   const entries: RiskRegisterEntry[] = risks.map((risk) => ({
     riskId: risk.id,
-    title: risk.title,
+    title: boundMcpText(risk.title),
     severity: risk.severity,
     probability: risk.probability,
     impact: risk.impact,

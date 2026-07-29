@@ -2,7 +2,7 @@ import { prisma } from "../db";
 import { validationError, type ServiceResult } from "../analysis/types";
 import { calculateBudgetVariance } from "../analysis/budget";
 import { budgetVarianceInputSchema } from "./schemas";
-import { MCP_LIMITS } from "./types";
+import { boundMcpText, MCP_LIMITS } from "./types";
 import type { BudgetVarianceSummary } from "./types";
 
 export async function getBudgetVariance(
@@ -43,7 +43,7 @@ export async function getBudgetVariance(
       variancePercentage: result.data.variancePercentage,
       itemSummaries: items.map((item) => ({
         budgetItemId: item.id,
-        category: item.category,
+        category: boundMcpText(item.category),
         plannedAmount: item.plannedAmount.toFixed(2),
         actualAmount: item.actualAmount.toFixed(2),
         varianceAmount: item.actualAmount.minus(item.plannedAmount).toFixed(2),

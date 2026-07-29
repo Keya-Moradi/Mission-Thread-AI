@@ -650,7 +650,13 @@ async function buildGraphUnsafe(program: {
       label: label(`Analysis run ${analysisRunId}`),
       subtitle: `${attempts.length} attempt${attempts.length === 1 ? "" : "s"}`,
       status: terminal.status,
-      href: `/programs/edgelink-x/analyses/${terminal.id}`,
+      // The [id] route segment under /programs/edgelink-x/analyses/[id] is
+      // always the logical analysisRunId (shared by every attempt of a
+      // run), never a specific ImpactAnalysis row's own id — see
+      // apps/web's decision/apply pages, which both 404 unless
+      // option.impactAnalysis.analysisRunId === params.id. Using
+      // terminal.id here would build a link that never resolves.
+      href: `/programs/edgelink-x/analyses/${encodeURIComponent(analysisRunId)}`,
       metadata: {
         attemptCount: attempts.length,
         terminalStatus: terminal.status,
@@ -695,10 +701,16 @@ async function buildGraphUnsafe(program: {
   const analysisRunIdByTerminalAnalysisId = new Map(
     runInfos.map((run) => [run.terminalAnalysisId, run.analysisRunId]),
   );
+  // Built here (not derived later from mitigationOptions) so the
+  // PROPOSED_CHANGE loop below can look up each change's logical run ID by
+  // its mitigationOptionId alone, without re-deriving it from
+  // impactAnalysisId a second time.
+  const analysisRunIdByOptionId = new Map<string, string>();
 
   for (const option of mitigationOptions) {
     const runId = analysisRunIdByTerminalAnalysisId.get(option.impactAnalysisId);
     if (!runId) continue;
+    analysisRunIdByOptionId.set(option.id, runId);
     const runNodeId = threadNodeId("ANALYSIS_RUN", runId);
     const optionNodeId = threadNodeId("MITIGATION_OPTION", option.id);
     builder.addNode({
@@ -708,7 +720,9 @@ async function buildGraphUnsafe(program: {
       label: label(option.title),
       subtitle: `Option ${option.optionIndex + 1}`,
       status: option.status,
-      href: `/programs/edgelink-x/analyses/${option.impactAnalysisId}/options/${option.id}/decision`,
+      // Same analysisRunId-not-impactAnalysisId rule as the ANALYSIS_RUN
+      // node above — the decision page 404s otherwise.
+      href: `/programs/edgelink-x/analyses/${encodeURIComponent(runId)}/options/${encodeURIComponent(option.id)}/decision`,
       metadata: {
         costImpact: money(option.costImpact),
         scheduleImpact: option.scheduleImpact,
@@ -765,6 +779,8 @@ async function buildGraphUnsafe(program: {
   for (const change of proposedChanges) {
     const optionNodeId = threadNodeId("MITIGATION_OPTION", change.mitigationOptionId);
     if (!builder.hasNode(optionNodeId)) continue;
+    const runId = analysisRunIdByOptionId.get(change.mitigationOptionId);
+    if (!runId) continue;
     const id = threadNodeId("PROPOSED_CHANGE", change.id);
     builder.addNode({
       id,
@@ -773,7 +789,7 @@ async function buildGraphUnsafe(program: {
       label: label(change.changeType.replaceAll("_", " ")),
       subtitle: null,
       status: change.status,
-      href: `/programs/edgelink-x/analyses/${mitigationOptionAnalysisId(mitigationOptions, change.mitigationOptionId)}/options/${change.mitigationOptionId}/apply`,
+      href: `/programs/edgelink-x/analyses/${encodeURIComponent(runId)}/options/${encodeURIComponent(change.mitigationOptionId)}/apply`,
       metadata: { changeType: change.changeType, targetRecordType: change.targetRecordType },
     });
     builder.addEdge("PROPOSED", optionNodeId, id, { label: "Proposed" });
@@ -844,13 +860,6 @@ async function buildGraphUnsafe(program: {
   builder.connectOrphans(programNodeId);
 
   return builder.build(programId);
-}
-
-function mitigationOptionAnalysisId(
-  options: Array<{ id: string; impactAnalysisId: string }>,
-  optionId: string,
-): string {
-  return options.find((option) => option.id === optionId)?.impactAnalysisId ?? "";
 }
 
 function proposedChangeTargetToNodeKind(targetRecordType: string): ThreadNodeKind | null {

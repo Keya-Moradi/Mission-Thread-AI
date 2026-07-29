@@ -11,6 +11,8 @@ const SRC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..",
 
 const SOURCE_FILES = [
   "index.ts",
+  "stdio-server.ts",
+  "cli.ts",
   "server.ts",
   "tool-result.ts",
   "tools/get-program-summary.ts",

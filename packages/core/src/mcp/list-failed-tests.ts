@@ -1,7 +1,7 @@
 import { prisma } from "../db";
 import { notFound, ok, validationError, type ServiceResult } from "../analysis/types";
 import { failedTestsInputSchema } from "./schemas";
-import { MCP_LIMITS } from "./types";
+import { boundMcpText, MCP_LIMITS } from "./types";
 import type { FailedTest } from "./types";
 
 // Only TestOutcome.FAILED — BLOCKED and NOT_RUN are never reinterpreted as
@@ -35,11 +35,19 @@ export async function listFailedTests(input: unknown): Promise<ServiceResult<Fai
   });
 
   const testCaseIds = failedTests.map((test) => test.id);
+  // Only active defects — the tool contract is "related open defects";
+  // RESOLVED and CLOSED defects are no longer open and must never appear
+  // here (§4 of the correction pass, and get_requirement's separate
+  // relatedDefects field is where a resolved/closed defect's history is
+  // still visible).
   const defects =
     testCaseIds.length === 0
       ? []
       : await prisma.defect.findMany({
-          where: { relatedTestCaseId: { in: testCaseIds } },
+          where: {
+            relatedTestCaseId: { in: testCaseIds },
+            status: { in: ["OPEN", "IN_PROGRESS"] },
+          },
           select: { id: true, severity: true, relatedTestCaseId: true },
         });
 
@@ -54,7 +62,7 @@ export async function listFailedTests(input: unknown): Promise<ServiceResult<Fai
   return ok(
     failedTests.map((test) => ({
       testCaseId: test.id,
-      name: test.name,
+      name: boundMcpText(test.name),
       outcome: "FAILED" as const,
       lastRunAt: test.lastRunAt ? test.lastRunAt.toISOString() : null,
       requirementIds: test.requirements.map((link) => link.requirementId).sort(),

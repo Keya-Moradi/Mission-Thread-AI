@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
+import { afterEach, describe, expect, it } from "vitest";
 import { prisma } from "../db";
-import { PROGRAM_ID, REQUIREMENT_IDS, MILESTONE_IDS, COMPONENT_IDS } from "../seed/ids";
+import { PROGRAM_ID, REQUIREMENT_IDS, MILESTONE_IDS, COMPONENT_IDS, TEST_IDS } from "../seed/ids";
 import { getProgramSummary } from "./get-program-summary";
 import { getRequirement } from "./get-requirement";
 import { getScheduleDependencies } from "./get-schedule-dependencies";
@@ -134,6 +135,75 @@ describe("listFailedTests", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.some((test) => test.relatedDefects.length > 0)).toBe(true);
+  });
+});
+
+describe("listFailedTests — active-defect filtering (correction pass §4)", () => {
+  const createdDefectIds: string[] = [];
+
+  afterEach(async () => {
+    for (const id of createdDefectIds.splice(0)) {
+      await prisma.defect.deleteMany({ where: { id } });
+    }
+  });
+
+  async function createFixtureDefect(status: "OPEN" | "IN_PROGRESS" | "RESOLVED" | "CLOSED") {
+    const id = `DEF-TEST-${randomUUID()}`;
+    await prisma.defect.create({
+      data: {
+        id,
+        programId: PROGRAM_ID,
+        title: `Fixture defect (${status})`,
+        description: "Created for a Phase 7 correction-pass test; safe to delete.",
+        severity: "LOW",
+        status,
+        relatedTestCaseId: TEST_IDS[0],
+      },
+    });
+    createdDefectIds.push(id);
+    return id;
+  }
+
+  it("OPEN and IN_PROGRESS defects are returned; RESOLVED and CLOSED are excluded", async () => {
+    const [openId, inProgressId, resolvedId, closedId] = await Promise.all([
+      createFixtureDefect("OPEN"),
+      createFixtureDefect("IN_PROGRESS"),
+      createFixtureDefect("RESOLVED"),
+      createFixtureDefect("CLOSED"),
+    ]);
+
+    const before = await prisma.defect.count();
+    const result = await listFailedTests({ programId: PROGRAM_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const test001 = result.data.find((t) => t.testCaseId === TEST_IDS[0]);
+    expect(test001).toBeDefined();
+    const defectIds = new Set(test001?.relatedDefects.map((d) => d.defectId));
+    expect(defectIds.has(openId)).toBe(true);
+    expect(defectIds.has(inProgressId)).toBe(true);
+    expect(defectIds.has(resolvedId)).toBe(false);
+    expect(defectIds.has(closedId)).toBe(false);
+
+    // No mutation occurred during an ordinary tool call.
+    const after = await prisma.defect.count();
+    expect(after).toBe(before);
+  });
+
+  it("relatedDefects stay deterministically sorted by defectId", async () => {
+    const ids = await Promise.all([
+      createFixtureDefect("OPEN"),
+      createFixtureDefect("IN_PROGRESS"),
+      createFixtureDefect("OPEN"),
+    ]);
+
+    const result = await listFailedTests({ programId: PROGRAM_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const test001 = result.data.find((t) => t.testCaseId === TEST_IDS[0]);
+    const relevant = (test001?.relatedDefects ?? []).filter((d) => ids.includes(d.defectId));
+    const sorted = [...relevant].sort((a, b) => a.defectId.localeCompare(b.defectId));
+    expect(relevant).toEqual(sorted);
   });
 });
 

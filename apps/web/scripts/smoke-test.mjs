@@ -681,6 +681,25 @@ async function main() {
       );
       check("thread page never exposes a password hash", !threadAsPmHtml.includes("passwordHash"));
 
+      console.log("\nPhase 7 digital-thread graph — generated analysis-run link resolves:");
+      const expectedAnalysisRunHref = `/programs/edgelink-x/analyses/${SEEDED_ANALYSIS_RUN_ID}`;
+      check(
+        "the accessible fallback contains a link to the seeded analysis run's analysisRunId route",
+        threadAsPmHtml.includes(`href="${expectedAnalysisRunHref}"`),
+      );
+      const followedAnalysisRun = await fetch(`${BASE_URL}${expectedAnalysisRunHref}`, {
+        headers: { Cookie: jar.header() },
+      });
+      const followedAnalysisRunHtml = await followedAnalysisRun.text();
+      check(
+        "following the graph-generated analysis-run link returns 200, not a 404",
+        followedAnalysisRun.status === 200,
+      );
+      check(
+        "the followed link lands on the real analysis workspace (shows the seeded trace ID)",
+        followedAnalysisRunHtml.includes(SEEDED_ANALYSIS_TRACE_ID),
+      );
+
       const threadAsLead = await fetch(`${BASE_URL}/programs/edgelink-x/thread`, {
         headers: { Cookie: leadJar.header() },
       });

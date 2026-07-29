@@ -7,6 +7,9 @@ import {
   DEPENDENCY_IDS,
   COMPONENT_IDS,
   MILESTONE_IDS,
+  ANALYSIS_IDS,
+  ANALYSIS_RUN_IDS,
+  MITIGATION_OPTION_IDS,
 } from "../seed/ids";
 import { buildProgramThread, validateGraphInvariants } from "./build-program-thread";
 import { threadNodeId, type ProgramThreadGraph, type ThreadEdge, type ThreadNode } from "./types";
@@ -289,7 +292,12 @@ describe("buildProgramThread — DB-backed, against the seeded test database", (
     expect(matching.length).toBe(1);
     expect(matching[0]!.status).toBe("SUCCEEDED");
     expect(matching[0]!.metadata.attemptCount).toBe(2);
-    expect(matching[0]!.href).toContain(secondId);
+    // The route's [id] segment is the logical analysisRunId, not the
+    // terminal attempt's own ImpactAnalysis.id — see
+    // apps/web's decision/apply pages, which 404 on a mismatch.
+    expect(matching[0]!.href).toContain(runId);
+    expect(matching[0]!.href).not.toContain(firstId);
+    expect(matching[0]!.href).not.toContain(secondId);
   });
 
   it("[proposed change target] a MILESTONE_DATE change TARGETS the correct milestone node, and a NEW_ACTION change has no TARGETS edge", async () => {
@@ -424,6 +432,175 @@ describe("buildProgramThread — DB-backed, against the seeded test database", (
   });
 });
 
+describe("graph workflow links — use the logical analysisRunId, never an attempt's own ImpactAnalysis.id", () => {
+  const decisionPattern = /^\/programs\/edgelink-x\/analyses\/([^/]+)\/options\/([^/]+)\/decision$/;
+  const applyPattern = /^\/programs\/edgelink-x\/analyses\/([^/]+)\/options\/([^/]+)\/apply$/;
+  const analysisRunPattern = /^\/programs\/edgelink-x\/analyses\/([^/]+)$/;
+
+  it("[seeded analysis-run link] the seeded ANALYSIS_RUN node's href is exactly the analyses/[analysisRunId] route", async () => {
+    const result = await buildProgramThread(PROGRAM_ID);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const runNode = result.data.nodes.find(
+      (n) => n.kind === "ANALYSIS_RUN" && n.recordId === ANALYSIS_RUN_IDS.supplierDelay,
+    );
+    expect(runNode).toBeDefined();
+    expect(runNode?.href).toBe(`/programs/edgelink-x/analyses/${ANALYSIS_RUN_IDS.supplierDelay}`);
+    // The terminal attempt's own row ID must never appear in the link.
+    expect(runNode?.href).not.toContain(ANALYSIS_IDS.supplierDelay);
+  });
+
+  it("[seeded mitigation-option link] the seeded decision href embeds the logical run ID, not the attempt ID", async () => {
+    const result = await buildProgramThread(PROGRAM_ID);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const optionNode = result.data.nodes.find(
+      (n) =>
+        n.kind === "MITIGATION_OPTION" && n.recordId === MITIGATION_OPTION_IDS.supplierDelay[0],
+    );
+    expect(optionNode).toBeDefined();
+    expect(optionNode?.href).toBe(
+      `/programs/edgelink-x/analyses/${ANALYSIS_RUN_IDS.supplierDelay}/options/${MITIGATION_OPTION_IDS.supplierDelay[0]}/decision`,
+    );
+    expect(optionNode?.href).not.toContain(ANALYSIS_IDS.supplierDelay);
+  });
+
+  it("[every ANALYSIS_RUN node] links with its own analysisRunId (recordId), and never with a terminal attempt row ID", async () => {
+    const result = await buildProgramThread(PROGRAM_ID);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const attempts = await prisma.impactAnalysis.findMany({
+      where: { programEvent: { programId: PROGRAM_ID } },
+      select: { id: true, analysisRunId: true },
+    });
+    const attemptIds = new Set(attempts.map((a) => a.id));
+
+    for (const node of result.data.nodes.filter((n) => n.kind === "ANALYSIS_RUN")) {
+      const match = analysisRunPattern.exec(node.href ?? "");
+      expect(match).not.toBeNull();
+      expect(match?.[1]).toBe(node.recordId);
+      // The linked segment must never coincide with a real ImpactAnalysis
+      // row ID (an attempt ID), which would 404 against the actual route.
+      expect(attemptIds.has(decodeURIComponent(match?.[1] ?? ""))).toBe(false);
+    }
+  });
+
+  it("[every MITIGATION_OPTION decision link] embeds the option's logical analysisRunId", async () => {
+    const result = await buildProgramThread(PROGRAM_ID);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const options = await prisma.mitigationOption.findMany({
+      where: { impactAnalysis: { programEvent: { programId: PROGRAM_ID } } },
+      select: {
+        id: true,
+        impactAnalysisId: true,
+        impactAnalysis: { select: { analysisRunId: true } },
+      },
+    });
+    const runIdByOptionId = new Map(options.map((o) => [o.id, o.impactAnalysis.analysisRunId]));
+
+    for (const node of result.data.nodes.filter((n) => n.kind === "MITIGATION_OPTION")) {
+      const match = decisionPattern.exec(node.href ?? "");
+      expect(match).not.toBeNull();
+      expect(decodeURIComponent(match?.[1] ?? "")).toBe(runIdByOptionId.get(node.recordId));
+      expect(decodeURIComponent(match?.[2] ?? "")).toBe(node.recordId);
+    }
+  });
+
+  it("[every PROPOSED_CHANGE apply link] embeds the change's logical analysisRunId", async () => {
+    const { impactAnalysisId, analysisRunId } = await createSucceededRunFixture();
+    const optionId = `MIT-TEST-${randomUUID()}`;
+    await prisma.mitigationOption.create({
+      data: {
+        id: optionId,
+        impactAnalysisId,
+        optionIndex: 0,
+        title: "Fixture option",
+        description: "Fixture.",
+        tradeoffs: "None.",
+      },
+    });
+    const changeId = `PC-TEST-${randomUUID()}`;
+    await prisma.proposedChange.create({
+      data: {
+        id: changeId,
+        mitigationOptionId: optionId,
+        changeType: "MILESTONE_DATE",
+        targetRecordId: MILESTONE_IDS[0],
+        targetRecordType: "MILESTONE",
+        oldValue: { plannedDate: "2026-09-15" },
+        newValue: { plannedDate: "2026-09-20" },
+      },
+    });
+
+    const result = await buildProgramThread(PROGRAM_ID);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const changeNode = result.data.nodes.find(
+      (n) => n.kind === "PROPOSED_CHANGE" && n.recordId === changeId,
+    );
+    expect(changeNode).toBeDefined();
+    expect(changeNode?.href).toBe(
+      `/programs/edgelink-x/analyses/${analysisRunId}/options/${optionId}/apply`,
+    );
+    expect(changeNode?.href).not.toContain(impactAnalysisId);
+  });
+
+  it("[resolves without 404] a controlled decision/apply fixture's constructed links satisfy the exact condition apps/web's pages check", async () => {
+    const { impactAnalysisId, analysisRunId } = await createSucceededRunFixture();
+    const optionId = `MIT-TEST-${randomUUID()}`;
+    await prisma.mitigationOption.create({
+      data: {
+        id: optionId,
+        impactAnalysisId,
+        optionIndex: 0,
+        title: "Fixture option",
+        description: "Fixture.",
+        tradeoffs: "None.",
+      },
+    });
+
+    const result = await buildProgramThread(PROGRAM_ID);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const optionNode = result.data.nodes.find(
+      (n) => n.kind === "MITIGATION_OPTION" && n.recordId === optionId,
+    );
+    const match = decisionPattern.exec(optionNode?.href ?? "");
+    expect(match).not.toBeNull();
+    const [, linkedRunId, linkedOptionId] = match!;
+
+    // Reproduce the exact guard apps/web's decision/apply pages use
+    // (option.impactAnalysis.analysisRunId !== params.id => notFound()) —
+    // proving the constructed link would NOT 404.
+    const option = await prisma.mitigationOption.findUnique({
+      where: { id: linkedOptionId },
+      include: { impactAnalysis: { select: { analysisRunId: true } } },
+    });
+    expect(option).not.toBeNull();
+    expect(option?.impactAnalysis.analysisRunId).toBe(linkedRunId);
+    expect(linkedRunId).toBe(analysisRunId);
+  });
+
+  it("[no mutation-endpoint links] every non-null href is a safe GET-navigable page route, never an API/action endpoint", async () => {
+    const result = await buildProgramThread(PROGRAM_ID);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    for (const node of result.data.nodes) {
+      if (!node.href) continue;
+      expect(node.href.startsWith("/programs/edgelink-x")).toBe(true);
+      expect(node.href).not.toMatch(/^\/api\//);
+      expect(node.href).not.toMatch(/\/actions?$/);
+      const isKnownPageShape =
+        node.href === "/programs/edgelink-x" ||
+        analysisRunPattern.test(node.href) ||
+        decisionPattern.test(node.href) ||
+        applyPattern.test(node.href);
+      expect(isKnownPageShape).toBe(true);
+    }
+  });
+});
+
 // ---- Fixture helpers (created + cleaned up per test, mirroring
 // packages/core/src/approvals/record-decision.test.ts) ----
 
@@ -445,14 +622,18 @@ async function createTempEvent(): Promise<{ eventId: string }> {
   return { eventId };
 }
 
-async function createSucceededRunFixture(): Promise<{ impactAnalysisId: string }> {
+async function createSucceededRunFixture(): Promise<{
+  impactAnalysisId: string;
+  analysisRunId: string;
+}> {
   const { eventId } = await createTempEvent();
   const impactAnalysisId = `ANALYSIS-TEST-${randomUUID()}`;
+  const analysisRunId = `RUN-TEST-${randomUUID()}`;
   await prisma.impactAnalysis.create({
     data: {
       id: impactAnalysisId,
       programEventId: eventId,
-      analysisRunId: `RUN-TEST-${randomUUID()}`,
+      analysisRunId,
       requestedById: DEMO_USER_IDS.programManager,
       traceId: `TRACE-TEST-${randomUUID()}`,
       status: "SUCCEEDED",
@@ -462,7 +643,7 @@ async function createSucceededRunFixture(): Promise<{ impactAnalysisId: string }
     },
   });
   createdAnalysisIds.push(impactAnalysisId);
-  return { impactAnalysisId };
+  return { impactAnalysisId, analysisRunId };
 }
 
 async function createFailedRunFixture(): Promise<void> {

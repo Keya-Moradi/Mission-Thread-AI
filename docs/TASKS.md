@@ -822,4 +822,115 @@ get_program_summary` round trip against the real seeded database.
       functionality (CI expansion, Docker completion, browser
       screenshots, the one authorized live-eval run) was added.
 
+## Phase 7 correction pass — graph-navigation and MCP-boundary — done (2026-07-29)
+
+Four confirmed defects fixed together. Full disposition is in
+`docs/DECISIONS.md`'s "(Phase 7 correction pass)" entry.
+
+- [x] **Graph workflow URLs** — `buildProgramThread()`'s `ANALYSIS_RUN`,
+      `MITIGATION_OPTION`, and `PROPOSED_CHANGE` node `href`s now use the
+      logical `analysisRunId` (via a new `analysisRunIdByOptionId` map,
+      alongside the existing `analysisRunIdByTerminalAnalysisId`), never a
+      terminal attempt's own `ImpactAnalysis.id` — every hop now matches
+      exactly what `apps/web`'s `/analyses/[id]` route family (analysis
+      workspace, decision page, apply-preview page) actually checks. All
+      three hrefs now wrap dynamic segments in `encodeURIComponent()`. The
+      unused `mitigationOptionAnalysisId()` helper was removed.
+- [x] `packages/core/src/thread/build-program-thread.test.ts` gained 7
+      graph-link tests (seeded link exactness, every ANALYSIS_RUN/
+      MITIGATION_OPTION/PROPOSED_CHANGE href pattern, a controlled
+      fixture reproducing apps/web's exact `notFound()` guard, a
+      safe-GET-route allowlist check) and one pre-existing test's
+      assertion — which had asserted the pre-fix, wrong behavior — was
+      corrected. `apps/web/scripts/smoke-test.mjs` gained 3 checks that
+      actually follow the graph-generated seeded-analysis link over real
+      HTTP and confirm it resolves (200, real trace ID), not a 404.
+- [x] **MCP package split into a side-effect-free library and an
+      executable CLI** — `packages/mcp-server/src/index.ts` now only
+      re-exports `createMissionThreadMcpServer`/
+      `startMissionThreadStdioServer`, with zero other statements; new
+      `stdio-server.ts` holds `startMissionThreadStdioServer()` (connects
+      a transport only when called, registers no process handler); new
+      `cli.ts` is the sole executable entry point (registers
+      SIGINT/SIGTERM, calls `startMissionThreadStdioServer()`, prints
+      exactly one fixed safe stderr message on startup failure — never
+      `error.message`/a stack trace/a database URL/raw Prisma or SDK
+      error text — and prefers `process.exitCode = 1` over an immediate
+      `process.exit()` so cleanup isn't truncated).
+      `package.json`'s `main`/`exports` now point at the built,
+      side-effect-free `dist/index.js`; `start` now runs `dist/cli.js`;
+      `build.mjs` emits both as two independent esbuild bundles.
+- [x] New `packages/mcp-server/src/test/probes/import-probe.mjs` +
+      `import-side-effects.test.ts` (2 tests: source entry via `tsx`, and
+      the built `dist/index.js` via plain `node`, skipped cleanly if not
+      yet built) prove importing the package root connects no transport,
+      writes nothing to stdout/stderr, registers no SIGINT/SIGTERM
+      handler, calls no `process.exit`, and never queries the database
+      (run with an intentionally unreachable `DATABASE_URL`). New
+      `built-stdio-protocol.test.ts` (1 test, skipped cleanly if not
+      built) drives the actual built `dist/cli.js` as a real child
+      process through a full stdio protocol round trip.
+- [x] **MCP input/output bounds completed** — new `MCP_LIMITS.maxIdLength`
+      (128) and `mcpEntityIdSchema` (`packages/core/src/mcp/schemas.ts`)
+      now guard all six MCP tool input schemas — an oversized ID (up to
+      and including 1,000,000 characters) is rejected with a fixed,
+      non-value-echoing message before any database query.
+      `packages/mcp-server/src/tool-result.ts` rewritten around one
+      shared `boundedTextResult()` guard applied to success, expected
+      `ServiceResult` errors, and unexpected thrown exceptions alike — an
+      oversized result of any kind falls back to the same small fixed
+      literal, and an error's `entityId` is only echoed once it
+      independently re-passes `mcpEntityIdSchema`. New
+      `packages/core/src/mcp/types.ts`'s `boundMcpText()` (reusing the
+      same surrogate-pair-safe `truncateText()` the Phase 4 evidence
+      pipeline uses) is now applied to every database-derived free-text
+      field across the six services — program name/description,
+      requirement title, linked component/test names, milestone names,
+      failed-test names, budget categories, risk titles — never to
+      record IDs, enum values, dates, or money strings. The byte ceiling
+      is measured via `Buffer.byteLength(text, "utf8")`, proven (via
+      dedicated tests) to catch both multi-byte-Unicode undercounting and
+      JSON-escape-expansion undercounting that a naive `string.length` or
+      pre-serialization check would miss.
+- [x] New `packages/core/src/mcp/bounds.test.ts` (12 tests: pure
+      `mcpEntityIdSchema`/`boundMcpText` coverage), new
+      `packages/mcp-server/src/tool-result.test.ts` (9 tests: pure
+      byte-ceiling/entityId-omission unit coverage), new
+      `packages/mcp-server/src/mcp-boundary.test.ts` (6 tests:
+      end-to-end oversized-ID-through-a-real-tool-call coverage,
+      including the exact-1,000,000-character case and an
+      exactly-at-the-bound/one-over-the-bound pair).
+- [x] **`list_failed_tests` returns only active (OPEN/IN_PROGRESS)
+      related defects** — `status: { in: ["OPEN", "IN_PROGRESS"] }` added
+      to the existing defect query; RESOLVED/CLOSED defects no longer
+      appear as if still open. `get_requirement`'s separate,
+      status-unfiltered `relatedDefects` field is intentionally
+      unaffected — it answers a different question (full defect history,
+      not current active exposure). `packages/core/src/mcp/mcp-services.test.ts`
+      gained a 2-test "active-defect filtering"
+      block with its own controlled fixture defects (OPEN, IN_PROGRESS,
+      RESOLVED, CLOSED), cleaned up in `afterEach`, proving the correct
+      subset is returned, deterministically sorted, with zero mutation
+      during the ordinary tool call.
+- [x] `packages/mcp-server/src/read-only-boundary.test.ts`'s static
+      source-file scan extended to cover the two new
+      `stdio-server.ts`/`cli.ts` files.
+- [x] `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/THREAT_MODEL.md`,
+      this file, and `README.md` updated. No Prisma migration was needed
+      or added. Nothing in Part A's or Part B's already-completed
+      behavior (one node per analysisRunId, terminal-attempt selection,
+      citation behavior, graph invariants, deterministic layout,
+      read-only React Flow settings, the accessible fallback, the exact
+      six MCP tools, strict schemas, stdio-only transport, the
+      zero-SQL/shell/filesystem/provider-import boundary, zero-mutation
+      MCP behavior, test-database isolation) was weakened.
+- [x] Full quality gate: see the correction-pass verification report for
+      exact final test totals, smoke/Playwright/MCP-protocol results,
+      and `npm audit` disposition. `db:reset:test` re-authorized fresh
+      for this pass and honored via
+      `PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION`, never bypassed.
+      `eval:live` was not run; no live OpenAI request was made; Phases
+      1–6 were not reopened beyond the four confirmed-defect fixes above;
+      no Phase 8 functionality was added.
+
 ## Phase 8 — Delivery (not started)

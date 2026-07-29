@@ -201,6 +201,24 @@ update/delete/upsert`, verified by both direct code review and a static
   beyond this document. None of these three layers alone is treated as
   sufficient; together they mean a single missed code-review comment can't
   reintroduce a write path unnoticed.
+- **Every wire result — success or error — is bounded, and importing the
+  package is side-effect-free.** (Phase 7 correction pass.) An oversized
+  result of any kind (a large success payload, an oversized error message,
+  an unexpected thrown exception) falls back to the same small fixed
+  literal rather than exceeding the 32,000-byte MCP output ceiling —
+  measured by real serialized UTF-8 bytes, not JS `string.length`, so
+  multi-byte Unicode and JSON-escape expansion can't sneak a result over
+  the limit uncounted. An oversized caller-supplied ID (up to and
+  including 1,000,000 characters) is rejected by `mcpEntityIdSchema`
+  before any database query runs, and is never echoed back into an error
+  message. Separately, `packages/mcp-server/src/index.ts` (the package's
+  `main`/`exports` entry) is a pure re-export module with zero side
+  effects — connecting stdio, registering `SIGINT`/`SIGTERM`, and calling
+  `process.exit` are all confined to `src/cli.ts`, the one executable
+  entry point. A dedicated child-process probe test (with an
+  intentionally unreachable `DATABASE_URL`) proves importing the package
+  root never connects a transport, writes to stdout/stderr, registers a
+  process signal handler, or queries the database.
 - **Tool-poisoning considerations.** An MCP tool's `description` field is
   visible to, and may be weighted by, the connecting host's own model —
   making it a place a malicious server could embed a hidden instruction

@@ -1,3 +1,5 @@
+import { truncateText } from "../analysis/evidence";
+
 // Shared output bounds for every MCP read service (Phase 7, PART B, §13).
 // These are framework-independent (no MCP SDK import here) — packages/mcp-server
 // wraps this module's ServiceResult<T> outputs into the MCP content format
@@ -12,7 +14,21 @@ export const MCP_LIMITS = {
   defaultDependencyDepth: 5,
   /** Maximum length of any free-text-ish field this module emits (names, titles — never raw notes/rationale, which are never emitted at all). */
   maxTextLength: 300,
+  /** Maximum length of any caller-supplied entity ID an MCP tool input accepts — enforced before any database query. */
+  maxIdLength: 128,
 } as const;
+
+/**
+ * Deterministically bounds a database-derived free-text field (a name,
+ * title, or category — never a record ID, enum value, ISO date, or
+ * fixed-decimal money string, none of which this should ever be called
+ * on) to MCP_LIMITS.maxTextLength. Reuses the same surrogate-pair-safe
+ * truncation the Phase 4 evidence pipeline already uses, so a truncated
+ * value never ends mid-astral-character.
+ */
+export function boundMcpText(value: string): string {
+  return truncateText(value, MCP_LIMITS.maxTextLength).text;
+}
 
 export interface RecordCounts {
   components: number;

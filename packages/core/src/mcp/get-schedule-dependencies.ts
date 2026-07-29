@@ -1,8 +1,8 @@
 import { validationError, type ServiceResult } from "../analysis/types";
 import { getDependencyChain, type DependencyChainNode } from "../analysis/dependencies";
 import { scheduleDependenciesInputSchema } from "./schemas";
-import { MCP_LIMITS } from "./types";
-import type { ScheduleDependencies } from "./types";
+import { boundMcpText, MCP_LIMITS } from "./types";
+import type { DependencyNode, ScheduleDependencies } from "./types";
 
 function withinDepth(
   nodes: DependencyChainNode[],
@@ -13,6 +13,13 @@ function withinDepth(
 } {
   const kept = nodes.filter((node) => node.depth <= maxDepth);
   return { kept, truncated: kept.length < nodes.length };
+}
+
+// Milestone name is the only free-text field on a DependencyChainNode —
+// status/plannedDate/depth/viaDependencyId are all enum-like, date, or
+// numeric/ID values, never truncated (see §14, "Apply maxTextLength").
+function boundNode(node: DependencyChainNode): DependencyNode {
+  return { ...node, name: boundMcpText(node.name) };
 }
 
 export async function getScheduleDependencies(
@@ -51,8 +58,8 @@ export async function getScheduleDependencies(
     data: {
       milestoneId: result.data.milestoneId,
       maxDepth,
-      upstream: upstream.kept,
-      downstream: downstream.kept,
+      upstream: upstream.kept.map(boundNode),
+      downstream: downstream.kept.map(boundNode),
       truncatedByMaxDepth: upstream.truncated || downstream.truncated,
       missingData,
     },

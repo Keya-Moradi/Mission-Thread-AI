@@ -1,7 +1,7 @@
 // Framework-independent MCP read services (Phase 7, PART B, §13). This
 // module must never import the MCP SDK — packages/mcp-server wraps these
 // ServiceResult<T> functions into MCP tools.
-export { MCP_LIMITS } from "./types";
+export { MCP_LIMITS, boundMcpText } from "./types";
 export type {
   RecordCounts,
   ProgramSummary,
@@ -14,6 +14,7 @@ export type {
 } from "./types";
 
 export {
+  mcpEntityIdSchema,
   programSummaryInputSchema,
   requirementInputSchema,
   scheduleDependenciesInputSchema,

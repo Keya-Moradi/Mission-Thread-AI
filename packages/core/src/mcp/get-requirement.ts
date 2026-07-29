@@ -3,6 +3,7 @@ import { notFound, ok, validationError, type ServiceResult } from "../analysis/t
 import { getVerificationGaps } from "../analysis/verification";
 import { getRelatedDefects } from "../analysis/defects";
 import { requirementInputSchema } from "./schemas";
+import { boundMcpText } from "./types";
 import type { RequirementDetail } from "./types";
 
 export async function getRequirement(input: unknown): Promise<ServiceResult<RequirementDetail>> {
@@ -38,16 +39,16 @@ export async function getRequirement(input: unknown): Promise<ServiceResult<Requ
 
   return ok({
     requirementId: requirement.id,
-    title: requirement.title,
+    title: boundMcpText(requirement.title),
     priority: requirement.priority,
     status: requirement.status,
     linkedComponents: requirement.components
-      .map((link) => ({ componentId: link.component.id, name: link.component.name }))
+      .map((link) => ({ componentId: link.component.id, name: boundMcpText(link.component.name) }))
       .sort((a, b) => a.componentId.localeCompare(b.componentId)),
     linkedTests: requirement.testCases
       .map((link) => ({
         testCaseId: link.testCase.id,
-        name: link.testCase.name,
+        name: boundMcpText(link.testCase.name),
         outcome: link.testCase.outcome,
       }))
       .sort((a, b) => a.testCaseId.localeCompare(b.testCaseId)),

@@ -3,6 +3,7 @@ import { notFound, ok, validationError, type ServiceResult } from "../analysis/t
 import { calculateBudgetVariance } from "../analysis/budget";
 import { calculateReadinessScore } from "../analysis/readiness";
 import { programSummaryInputSchema } from "./schemas";
+import { boundMcpText } from "./types";
 import type { ProgramSummary } from "./types";
 
 export async function getProgramSummary(input: unknown): Promise<ServiceResult<ProgramSummary>> {
@@ -89,8 +90,8 @@ export async function getProgramSummary(input: unknown): Promise<ServiceResult<P
 
   return ok({
     programId: program.id,
-    name: program.name,
-    description: program.description,
+    name: boundMcpText(program.name),
+    description: boundMcpText(program.description),
     counts: {
       components: componentCount,
       requirements: requirementCount,
