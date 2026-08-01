@@ -19,11 +19,12 @@ import { writeJsonReport } from "./reporters";
 
 // Entry point for `npm run eval:live` — NOT executed during Phase 6 (see
 // docs/DECISIONS.md, "Phase 6: guarded live-evaluation command"). Phase 8
-// owns the one authorized, sanitized live-evaluation run and
+// ran the one authorized, sanitized live-evaluation run; see
 // docs/EVAL_RESULTS.md.
 //
-// This script deliberately never calls runImpactAnalysis() or touches
-// Prisma/the database: it calls the LLMProvider abstraction directly
+// This script deliberately never calls runImpactAnalysis(). The
+// live-evaluation runner never connects to, queries, or mutates the
+// database: it calls the LLMProvider abstraction directly
 // (createProviderFromEnv() -> provider.generateImpactAnalysis()) against
 // six fixed, fictional, offline fixtures (the same ones evals/scenarios.ts
 // uses for the mock suite's non-adversarial scenarios — the three
@@ -36,6 +37,14 @@ import { writeJsonReport } from "./reporters";
 // here, since replicating it would double this script's already-capped
 // worst-case call count for what is meant to be a small, bounded sanity
 // check, not a full pipeline exercise.
+//
+// Note: the @missionthread/core import above does construct an unconnected
+// PrismaClient as a module-load side effect (packages/core/src/db.ts's
+// `export const prisma = ...` runs eagerly on import of the root barrel) —
+// but constructing that object opens no network connection and issues no
+// query on its own. No query or connection is ever initiated by this
+// script. See docs/DECISIONS.md, "Live-eval Prisma import-boundary
+// wording."
 const LIVE_EVAL_FIXTURES: { id: string; modelInput: ModelInputProjection }[] = [
   { id: "supplier-delay-multi-milestone", modelInput: supplierDelayMultiMilestoneModelInput },
   { id: "failed-test-verification-gap", modelInput: failedTestVerificationGapModelInput },

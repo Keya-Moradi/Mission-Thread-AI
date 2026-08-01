@@ -1011,6 +1011,11 @@ Full disposition for each item below is in `docs/DECISIONS.md`'s "(Phase
       and CI-coverage bullets refreshed to current, verified numbers (8
       findings — 1 moderate, 7 high — down from 16 as of Phase 7, same two
       already-triaged dependency chains, no new advisory).
+      **Superseded by the Phase 8 documentation-consistency correction
+      below**: the "8 findings" figure reflected the state before this same
+      pass's later `npm audit fix` run reduced it further — see
+      `docs/DEPENDENCY_ADVISORIES.md` for the current, identity-keyed
+      disposition (four reviewed advisories: three high, one moderate).
 - [x] **Live-evaluation run** (`docs/SPEC.md` §13/§19/§20): the one
       authorized live-provider call against the six live-eval fixtures, run
       directly by the project maintainer in their own terminal (never by
