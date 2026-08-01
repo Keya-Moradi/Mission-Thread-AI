@@ -24,7 +24,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const BASELINE_PATH = join(ROOT_DIR, "scripts", "dependency-advisory-baseline.json");
@@ -165,10 +165,28 @@ function main() {
   process.exitCode = result.passed ? 0 : 1;
 }
 
-// Only run as a script when invoked directly (`node check-audit.mjs` /
-// `npm run check:audit`) — not when a test imports this module's exported
-// pure functions, which must never shell out to npm or read the baseline
-// file as a side effect of import alone.
-if (import.meta.url === `file://${process.argv[1]}`) {
+/** Pure: true when this module was the process's direct entry point
+ * (`node check-audit.mjs` / `npm run check:audit`), false when it was only
+ * imported (e.g. by a test). `import.meta.url` is always a proper,
+ * percent-encoded `file:` URL; `argvPath` is a raw filesystem path from
+ * `process.argv[1]` and must be converted with `pathToFileURL()` before
+ * comparison — a naive `` `file://${argvPath}` `` template does not
+ * percent-encode a space, `#`, `%`, or non-ASCII character the way a real
+ * `file:` URL does, so on a checkout path containing any of those this
+ * comparison would always be false, `main()` would never run, and
+ * `npm run check:audit` would silently exit 0 with no audit output at all
+ * — a "PASS" that never actually checked anything. See docs/DECISIONS.md,
+ * "v1.0.1 — encoded-path direct-invocation guard fix." Returns `false`,
+ * never throws, when `argvPath` is absent (e.g. under some non-standard
+ * process launchers). */
+export function isDirectInvocation(moduleUrl, argvPath) {
+  if (!argvPath) return false;
+  return moduleUrl === pathToFileURL(argvPath).href;
+}
+
+// Only run as a script when invoked directly — not when a test imports
+// this module's exported pure functions, which must never shell out to
+// npm or read the baseline file as a side effect of import alone.
+if (isDirectInvocation(import.meta.url, process.argv[1])) {
   main();
 }

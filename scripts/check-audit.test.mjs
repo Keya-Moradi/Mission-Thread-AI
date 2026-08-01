@@ -7,8 +7,14 @@
 // exercise the actual production decision function, not a re-implementation
 // of it. Run via `npm run test:scripts` (also part of the root
 // `npm run test`) or directly: `npx vitest run scripts/check-audit.test.mjs`.
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
-import { buildBaselineMap, evaluateFindings, extractGatedFindings } from "./check-audit.mjs";
+import {
+  buildBaselineMap,
+  evaluateFindings,
+  extractGatedFindings,
+  isDirectInvocation,
+} from "./check-audit.mjs";
 
 function baselineWith(...advisories) {
   return buildBaselineMap({ advisories });
@@ -158,5 +164,62 @@ describe("evaluateFindings — the actual pass/fail gate", () => {
     expect(result.passed).toBe(false);
     expect(result.unidentified).toHaveLength(1);
     expect(result.unreviewed).toHaveLength(1);
+  });
+});
+
+// v1.0.1: isDirectInvocation() replaced a naive `` `file://${argvPath}` ``
+// string template, which never percent-encodes argvPath the way a real
+// `file:` URL does — on a checkout path containing a space, #, %, or
+// non-ASCII character, that naive comparison was always false, so
+// `main()` never ran and `npm run check:audit` silently exited 0 with no
+// audit output at all. Each case below builds `moduleUrl` the same way
+// Node itself would set `import.meta.url` for that path (via
+// `pathToFileURL(...).href`, which does percent-encode), so these tests
+// exercise the real encoding behavior the production guard depends on,
+// not a re-implementation of it.
+describe("isDirectInvocation — encoded-path direct-invocation guard", () => {
+  it("detects direct invocation for an ordinary path", () => {
+    const argvPath = "/repo/scripts/check-audit.mjs";
+    expect(isDirectInvocation(pathToFileURL(argvPath).href, argvPath)).toBe(true);
+  });
+
+  it("detects direct invocation when the checkout path contains spaces", () => {
+    const argvPath = "/Users/keya/Desktop/Mission Thread AI/scripts/check-audit.mjs";
+    expect(isDirectInvocation(pathToFileURL(argvPath).href, argvPath)).toBe(true);
+  });
+
+  it("detects direct invocation when the checkout path contains # and % characters", () => {
+    const argvPath = "/repo/mission#thread 100%/scripts/check-audit.mjs";
+    expect(isDirectInvocation(pathToFileURL(argvPath).href, argvPath)).toBe(true);
+  });
+
+  it("detects direct invocation when the checkout path contains non-ASCII characters", () => {
+    const argvPath = "/repo/ミッションスレッド/scripts/check-audit.mjs";
+    expect(isDirectInvocation(pathToFileURL(argvPath).href, argvPath)).toBe(true);
+  });
+
+  it("returns false, never throws, when process.argv[1] is absent", () => {
+    const moduleUrl = pathToFileURL("/repo/scripts/check-audit.mjs").href;
+    expect(() => isDirectInvocation(moduleUrl, undefined)).not.toThrow();
+    expect(isDirectInvocation(moduleUrl, undefined)).toBe(false);
+  });
+
+  it("returns false for a different module URL — an import, not direct execution", () => {
+    const moduleUrl = pathToFileURL("/repo/scripts/check-audit.mjs").href;
+    const argvPath = "/repo/scripts/check-audit.test.mjs";
+    expect(isDirectInvocation(moduleUrl, argvPath)).toBe(false);
+  });
+
+  it("would have silently failed under the old naive `file://${argvPath}` comparison for a spaced path", () => {
+    // Documents the exact regression this fix closes: the pre-v1.0.1
+    // template-literal comparison never encoded the space, so it never
+    // matched a real (encoded) import.meta.url — main() would never have
+    // run, and `npm run check:audit` would have exited 0 with no audit
+    // output at all.
+    const argvPath = "/Users/keya/Desktop/Mission Thread AI/scripts/check-audit.mjs";
+    const realModuleUrl = pathToFileURL(argvPath).href;
+    const naiveComparison = `file://${argvPath}`;
+    expect(realModuleUrl).not.toBe(naiveComparison);
+    expect(isDirectInvocation(realModuleUrl, argvPath)).toBe(true);
   });
 });

@@ -1077,7 +1077,17 @@ pass's own entries.
       object with no usable `via.url`/advisory ID, with 10 new Vitest
       regression tests (`scripts/check-audit.test.mjs`) — see
       `docs/DECISIONS.md`, "Dependency-advisory gate: fail closed on an
-      unidentified advisory."
+      unidentified advisory." **Hardened again in v1.0.1**: the script's
+      own direct-invocation guard (`node check-audit.mjs` vs. being
+      imported by a test) used a naive `` `file://${argvPath}` `` string
+      template that never percent-encodes a checkout path containing a
+      space/`#`/`%`/non-ASCII character, which would have made
+      `npm run check:audit` silently exit `0` with no audit output on such
+      a path — fixed with a new pure `isDirectInvocation()` using
+      `pathToFileURL()`, 7 more regression tests (17 total), and a live
+      verification run from a space-containing checkout path. See
+      `docs/DECISIONS.md`, "v1.0.1 — Encoded-path direct-invocation guard
+      fix."
 - [x] **CI structural hardening**: `concurrency` (cancel superseded runs of
       the same ref), `timeout-minutes: 30` on the job; verified (already
       true, now explicitly confirmed) no provider key/`RUN_LIVE_EVALS`
