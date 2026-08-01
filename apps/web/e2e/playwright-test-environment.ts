@@ -25,8 +25,12 @@ import {
  * Actions service-container tuple — the latter only actually matches when
  * `findApprovedDatabaseTarget()` also sees `GITHUB_ACTIONS === "true"` in
  * the environment passed to it (see `GITHUB_ACTIONS_TEST_TARGETS`'s own
- * `requiresGitHubActions` flag in db-safety.ts). This suite isn't wired
- * into CI yet, but the resolver stays correct if it ever is.
+ * `requiresGitHubActions` flag in db-safety.ts). Wired into CI as of
+ * Phase 8 (`.github/workflows/ci.yml`'s "Playwright end-to-end test"
+ * step) — that job writes a real `.env.test` file from its own
+ * already-approved `DATABASE_URL` before this suite runs, since this
+ * function only ever reads from a parsed `.env.test`, never from
+ * `process.env` directly.
  */
 const APPROVED_PLAYWRIGHT_TEST_TARGETS = [...LOCAL_TEST_TARGETS, ...GITHUB_ACTIONS_TEST_TARGETS];
 

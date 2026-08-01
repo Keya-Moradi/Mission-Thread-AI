@@ -798,8 +798,13 @@ application-side write failure. See `docs/SPEC.md` §9–10 and
 - **The Playwright end-to-end suite is wired into CI as of Phase 8**
   (`.github/workflows/ci.yml`, step "Playwright end-to-end test") — it also
   remains runnable locally (`npm run test:e2e`).
-- **`test:mcp` is wired into CI as of Phase 8** too, for the same reason —
-  it also remains runnable locally (`npm run test:mcp`).
+- **`packages/mcp-server`'s test suite runs in CI as of Phase 8**, as part
+  of the "Unit and integration tests" step (`npm run test`, which already
+  covers all three workspaces) — preceded by its own "Build MCP server"
+  step, so `built-stdio-protocol.test.ts`'s real built-executable check has
+  something to exercise. There's deliberately no separate "MCP server
+  tests" CI step, which would only re-run the same suite a second time; the
+  standalone command remains available locally (`npm run test:mcp`).
 - **Mock evals demonstrate pipeline and policy behavior, not general
   live-model quality** — `npm run eval:mock` proves the pipeline's
   deterministic/structural/semantic rules hold, not that a real model

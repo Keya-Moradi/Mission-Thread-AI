@@ -106,27 +106,30 @@ jobs:
       - name: Seed CI test database
         run: npm run db:seed:github-actions:internal
 
-      # Phase 2 added database-backed tests (packages/core/src/analysis) —
-      # they need the CI database migrated and seeded first, which unit
-      # tests alone previously didn't (see docs/DECISIONS.md).
-      - name: Unit and integration tests
-        run: npm run test
-
-      # Built *before* tested: packages/mcp-server/src/built-stdio-protocol.test.ts
-      # drives the real emitted dist/cli.js as a child process and fails
-      # loudly (not silently skips) when GITHUB_ACTIONS=true and dist/cli.js
-      # is missing — so a green CI run is real proof the built stdio server
-      # was actually exercised, not just the in-memory McpServer object. See
-      # docs/DECISIONS.md, "MCP build-before-test CI ordering."
+      # Built *before* any test runs, not just before a dedicated MCP test
+      # step: `npm run test` below is a root workspaces command that already
+      # runs packages/mcp-server's own Vitest suite as part of "Unit and
+      # integration tests" — a separate later "MCP server tests" step would
+      # only re-run those same tests a second time, redundantly. This
+      # ordering bug was real and caught live: an earlier version of this
+      # workflow built the MCP package *after* "Unit and integration tests",
+      # so packages/mcp-server/src/built-stdio-protocol.test.ts's new
+      # GITHUB_ACTIONS=true fail-loud check (see docs/DECISIONS.md, "MCP
+      # build-before-test CI ordering") fired here, immediately, because
+      # dist/cli.js didn't exist yet at this point in the job — confirmed by
+      # inspecting the actual failed GitHub Actions run, not assumed.
       - name: Build MCP server
         run: npm run build --workspace @missionthread/mcp-server
 
-      # Read-only against the same seeded CI database — never resets or
-      # seeds it itself (packages/mcp-server/src/test/setup-env.ts validates
-      # the target before Prisma is ever imported, same discipline as
-      # packages/core's own test setup).
-      - name: MCP server tests
-        run: npm run test:mcp
+      # Phase 2 added database-backed tests (packages/core/src/analysis) —
+      # they need the CI database migrated and seeded first, which unit
+      # tests alone previously didn't (see docs/DECISIONS.md). Covers all
+      # three workspaces, including packages/mcp-server's own suite
+      # (read-only against this same seeded CI database — never resets or
+      # seeds it itself) — no separate "MCP server tests" step exists
+      # precisely to avoid running that suite twice.
+      - name: Unit and integration tests
+        run: npm run test
 
       # Deterministic, offline, no database/network — see evals/README.md.
       # Proves pipeline and policy behavior, not general model quality; the
@@ -156,6 +159,29 @@ jobs:
       # bare ubuntu-latest image.
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
+
+      # playwright.config.ts deliberately loads .env.test from disk itself
+      # (not process.env) and refuses to run at all if that file can't be
+      # read — a real developer creates it once from .env.test.example (see
+      # README.md); nothing in this job creates a file on disk otherwise, so
+      # without this step the Playwright step fails immediately with "Failed
+      # to load .env.test: ENOENT" before ever reaching a database or
+      # webServer question. Every value below is copy-identical to this
+      # workflow's own top-level env: block — never a second, independently
+      # maintained set of CI database credentials — so
+      # resolvePlaywrightTestEnvironment() resolves to exactly the same
+      # GITHUB_ACTIONS_TEST_TARGETS-approved target every other step in this
+      # job already uses. Written only into the ephemeral runner workspace,
+      # never committed (.env.test is gitignored) and gone when the job ends.
+      - name: Create .env.test for Playwright
+        run: |
+          cat > .env.test <<EOF
+          NODE_ENV=test
+          DATABASE_URL=${DATABASE_URL}
+          TEST_DATABASE_URL=${TEST_DATABASE_URL}
+          AUTH_SECRET=${AUTH_SECRET}
+          AI_MODE=${AI_MODE}
+          EOF
 
       # Reuses the build from the "Production build" step above (the
       # workspace-level `test:e2e` script is bare `playwright test`, unlike
