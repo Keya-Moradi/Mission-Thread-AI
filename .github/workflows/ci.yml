@@ -76,6 +76,19 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
+      # Informational, not a merge gate: docs/DECISIONS.md ("Accepted 3
+      # moderate npm audit advisories...") already records a deliberate
+      # decision not to force-fix the advisories that currently exist in
+      # transitive dev-tooling dependencies, since the only available fixes
+      # are breaking framework downgrades. `continue-on-error` keeps this
+      # scan visible (it still shows as a flagged step in the GitHub Actions
+      # UI, and still prints full detail in the log) without failing every
+      # build over already-triaged findings. Revisit if a non-breaking
+      # upstream patch lands or a genuinely new advisory appears.
+      - name: Dependency vulnerability scan
+        continue-on-error: true
+        run: npm audit --audit-level=high
+
       - name: Migrate CI test database
         run: npm run db:migrate:deploy --workspace @missionthread/core
 
@@ -87,6 +100,20 @@ jobs:
       # tests alone previously didn't (see docs/DECISIONS.md).
       - name: Unit and integration tests
         run: npm run test
+
+      # Read-only against the same seeded CI database — never resets or
+      # seeds it itself (packages/mcp-server/src/test/setup-env.ts validates
+      # the target before Prisma is ever imported, same discipline as
+      # packages/core's own test setup).
+      - name: MCP server tests
+        run: npm run test:mcp
+
+      # Deterministic, offline, no database/network — see evals/README.md.
+      # Proves pipeline and policy behavior, not general model quality; the
+      # one live-provider run is a separate, manually authorized command
+      # (see docs/EVAL_RESULTS.md), never run in CI.
+      - name: Mock AI evaluation suite
+        run: npm run eval:mock
 
       - name: Production build
         run: npm run build
@@ -101,3 +128,41 @@ jobs:
         env:
           AUTH_TRUST_HOST: "true"
         run: npm run smoke --workspace @missionthread/web
+
+      # Only Chromium is installed (the one browser playwright.config.ts
+      # drives) — no reason to pull Firefox/WebKit for a single happy-path
+      # suite. `--with-deps` installs the runner's missing system libraries
+      # apt-get style; without it, headless Chromium fails to launch on a
+      # bare ubuntu-latest image.
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      # Reuses the build from the "Production build" step above (the
+      # workspace-level `test:e2e` script is bare `playwright test`, unlike
+      # the root script, which also rebuilds — see package.json) and the
+      # same seeded CI database the unit/integration tests already used;
+      # e2e/decision-workflow.spec.ts restores every record it changes in a
+      # try/finally, so running it after the Vitest suite (which cleans up
+      # its own temporary fixtures) still starts from the deterministic seed
+      # state. No separate reset step — see docs/DECISIONS.md, "Phase 5
+      # correction: non-destructive Playwright command". AUTH_TRUST_HOST is
+      # scoped here for the same reason as the smoke-test step above: the
+      # real server Playwright's webServer launches needs it in this runner
+      # environment specifically.
+      - name: Playwright end-to-end test
+        env:
+          AUTH_TRUST_HOST: "true"
+        run: npm run test:e2e --workspace @missionthread/web
+
+      # Build-only, not build-and-run: this proves the Dockerfile still
+      # produces a working image on every push without the added complexity
+      # and flakiness of wiring a container into this job's network to reach
+      # the ephemeral Postgres service. `docker build`/`docker run`/`GET
+      # /login` was already verified live against a real container — see
+      # docs/DECISIONS.md, "Dockerfile repaired" — and README.md documents
+      # the runtime `docker run` invocation for local/manual use. No
+      # DATABASE_URL build arg is passed; the Dockerfile's own non-secret,
+      # unreachable placeholder default is sufficient (`prisma generate`
+      # never opens a connection at build time).
+      - name: Docker build
+        run: docker build -t missionthread-ai .

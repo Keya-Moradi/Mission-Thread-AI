@@ -933,4 +933,92 @@ Four confirmed defects fixed together. Full disposition is in
       1–6 were not reopened beyond the four confirmed-defect fixes above;
       no Phase 8 functionality was added.
 
-## Phase 8 — Delivery (not started)
+## Phase 8 — Delivery — in progress (2026-08-01)
+
+Full disposition for each item below is in `docs/DECISIONS.md`'s "(Phase
+8)" entries.
+
+- [x] **Local environment bootstrap** (not itself a Phase 8 deliverable,
+      but required to do any of Phase 8's work): Node 24.18.0 via `nvm`,
+      `npm install`, `.env`/`.env.test` created from the example files, a
+      real `AUTH_SECRET` generated, `apps/web/.env` symlinked, Prisma
+      client generated and schema validated against the already-running
+      Docker Postgres (`missionthread_dev` was already at the latest
+      migration — `prisma migrate dev` reported "Already in sync").
+      `missionthread_dev` freshly reseeded
+      (`npm run db:seed:dev:destructive`, fresh `AskUserQuestion`
+      authorization obtained first). `missionthread_test` was **not**
+      reset this pass: Prisma's own AI-agent consent guardrail fired for
+      `db:reset:test` (as expected — see the 2026-07-18 "Destructive-operation
+      authorization policy" entry), and the harness's own permission
+      classifier separately blocked the
+      `PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION` rerun even after
+      `AskUserQuestion` authorization — rather than working around either
+      guardrail, a read-only row-count check confirmed `missionthread_test`
+      already held the correct, clean deterministic seed state (1 program,
+      8 requirements, 3 users, 1 seeded analysis, 0 decisions) from a prior
+      session, so the full quality gate proceeded against it unmodified. A
+      developer with full terminal access can still run
+      `npm run db:reset:test` directly whenever a guaranteed-fresh test
+      database is wanted.
+- [x] **Baseline quality gate confirmed green before any Phase 8 change**:
+      lint, format check, typecheck (3 workspaces), test (45 web + 751 core + 41 mcp = 837), production build, smoke test, `test:e2e` (Playwright,
+      1/1), `eval:mock` (8/8 scenarios), `test:mcp` (41/41) — establishing
+      that every change below is additive, not a fix riding along with
+      unrelated repairs.
+- [x] **CI expansion** (`docs/SPEC.md` §17): `.github/workflows/ci.yml`
+      gained five new steps — dependency vulnerability scan (`npm audit
+--audit-level=high`, informational, `continue-on-error: true`), MCP
+      server tests (`npm run test:mcp`), the mock AI evaluation suite
+      (`npm run eval:mock`), Playwright Chromium install + the Playwright
+      end-to-end test (`AUTH_TRUST_HOST` scoped to that one step, matching
+      the existing smoke-test step's pattern), and a Docker build-only step
+      (`docker build -t missionthread-ai .`, deliberately not build-and-run
+      — see `docs/DECISIONS.md` for the full ordering rationale). YAML
+      validated with `python3 -c "import yaml; yaml.safe_load(...)"`; every
+      new command verified passing locally first. The actual GitHub Actions
+      run against these changes is the real verification of
+      runner-specific behavior (matching every prior CI change in this
+      project's history) and had not yet been observed as of this entry.
+- [x] **Docker completion**: rebuilt the image locally
+      (`docker build -t missionthread-ai .`, succeeded), started a real
+      container against the local Docker Compose Postgres via
+      `host.docker.internal:55432`, and verified live: `GET /login` → 200
+      with the sign-in form, `GET /` → 307 redirect to `/login`. Container
+      stopped and the test image removed afterward. No Dockerfile changes
+      were needed — the Phase 1 correction-pass build already worked; this
+      pass re-verified it still does and wired the build (only) into CI
+      (above).
+- [x] **Fixed a real, reproducible `npx auth secret` documentation bug**
+      discovered during environment bootstrap: the `auth` npm package now
+      resolves to an unrelated library's CLI and prints a
+      `BETTER_AUTH_SECRET` line, not `AUTH_SECRET`. Both README.md
+      references replaced with a dependency-free `node -e
+"console.log(require('crypto').randomBytes(32).toString('base64'))"`,
+      with an explanatory note. No application code was affected.
+- [x] **Screenshots and demo script**: new `scripts/capture-screenshots.mjs`
+      (`npm run docs:screenshots`) captures nine PNGs of the main
+      authenticated surfaces to `docs/assets/screenshots/`, checked in;
+      README.md gained a "Screenshots" section. New `docs/DEMO_SCRIPT.md` —
+      a ~10-minute guided walkthrough of the full protected workflow spine,
+      cross-checked against `apps/web/e2e/decision-workflow.spec.ts` so
+      every step it narrates is already independently, automatically
+      verified. Neither addition changed any application code.
+- [x] **README.md updated** throughout for the above: "Quality gate
+      commands" section reflects `eval:mock`/`test:mcp`/`test:e2e` now
+      running in CI and Docker building in CI; "Docker" section notes the
+      new CI build step; "Limitations" section's npm-audit-findings count
+      and CI-coverage bullets refreshed to current, verified numbers (8
+      findings — 1 moderate, 7 high — down from 16 as of Phase 7, same two
+      already-triaged dependency chains, no new advisory).
+- [ ] **Live-evaluation run** (`docs/SPEC.md` §13/§19/§20): the one
+      authorized live-provider call against the six live-eval fixtures,
+      run directly by the project maintainer (never by this agent, which
+      never held `OPENAI_API_KEY`) per the same "an AI agent must not hold
+      a real provider credential" posture this project has followed
+      throughout. Pending as of this entry — see `docs/EVAL_RESULTS.md`
+      once complete.
+- [ ] **Final "Project status"/"Phase roadmap"/"Limitations" README rewrite
+      to Phase 8 complete**, and final full quality gate re-run (including
+      the newly-added CI-mirroring local commands), pending the
+      live-evaluation run above.

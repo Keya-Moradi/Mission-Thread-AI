@@ -53,6 +53,39 @@ one phase is authorized and built at a time, each with its own quality gate.
 [`docs/DECISIONS.md`](docs/DECISIONS.md) records why non-obvious choices were
 made.
 
+For a guided, step-by-step click-through of the whole protected workflow
+spine below — event entry, triggering an analysis, reading the mitigation
+options and their evidence, approval, apply preview, apply, and the
+resulting audit trail — see [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md).
+
+## Screenshots
+
+All captured from the seeded EdgeLink-X demo program
+(`npm run docs:screenshots`, see below) — no real program, supplier, or
+personnel data.
+
+|                                                                                 |                                                                              |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| ![Sign-in](docs/assets/screenshots/01-login.png)                                | ![Executive dashboard](docs/assets/screenshots/02-dashboard.png)             |
+| Sign-in                                                                         | Executive dashboard — readiness score, budget, recent events                 |
+| ![Program overview](docs/assets/screenshots/03-program-overview.png)            | ![Digital-thread graph](docs/assets/screenshots/05-digital-thread-graph.png) |
+| Program overview — traceability, milestones, risks, tests, defects              | Digital-thread graph — the whole program as a read-only React Flow canvas    |
+| ![Analysis workspace](docs/assets/screenshots/06-analysis-workspace.png)        | ![Readiness briefing](docs/assets/screenshots/07-readiness-briefing.png)     |
+| Analysis workspace — three mitigation options, evidence cited vs. supplied-only | Printable readiness briefing                                                 |
+| ![Decision page](docs/assets/screenshots/08-decision-page.png)                  | ![Audit trail](docs/assets/screenshots/09-audit.png)                         |
+| Decision page — structured approve/reject/request-revision                      | Append-only audit trail                                                      |
+
+Regenerate these yourself against your own seeded `missionthread_dev`
+database with a server already running
+(`npm run dev` or `npm run start --workspace @missionthread/web`):
+
+```bash
+SCREENSHOT_BASE_URL=http://localhost:3000 npm run docs:screenshots
+```
+
+`scripts/capture-screenshots.mjs` is a documentation tool only — not part of
+any test suite or CI step.
+
 ## Protected workflow spine
 
 The MVP is built around one protected end-to-end path, in this order of
@@ -152,11 +185,17 @@ cp .env.test.example .env.test
 ```
 
 Generate a real `AUTH_SECRET` for `.env` locally (the example file ships
-with a placeholder):
+with a placeholder), and paste the output into `.env` yourself:
 
 ```bash
-npx auth secret
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
+
+(`npx auth secret` — Auth.js's own documented command — no longer works for
+this: as of this writing, the `auth` package on npm resolves to an
+unrelated CLI for a different library and prints a `BETTER_AUTH_SECRET`
+line, not `AUTH_SECRET`. Verified directly while bootstrapping this
+environment for Phase 8 — see `docs/DECISIONS.md`.)
 
 `apps/web` (Next.js) only reads `.env`/`.env.local` from its own directory,
 so link the root file into place once:
@@ -265,7 +304,7 @@ machine. Use Docker Desktop's `host.docker.internal` address instead:
 ```bash
 docker run --rm -p 3000:3000 \
   -e DATABASE_URL="postgresql://missionthread:missionthread_local_dev_password@host.docker.internal:55432/missionthread_dev" \
-  -e AUTH_SECRET="<generate one with: npx auth secret>" \
+  -e AUTH_SECRET="<generate one — see 'Environment configuration' above>" \
   -e AUTH_TRUST_HOST=true \
   -e AI_MODE=mock \
   missionthread-ai
@@ -280,6 +319,13 @@ once the container is up.
 `docker-compose.yml` currently defines only the Postgres service, not an
 application container — the command above talks to that same Compose
 Postgres instance from outside Docker's internal network.
+
+CI (`.github/workflows/ci.yml`) runs `docker build` on every push as of
+Phase 8 — build-only, not build-and-run, to avoid the added complexity of
+wiring a container into that job's network to reach its ephemeral Postgres
+service. The `docker build` → `docker run` → `GET /login` → `GET /`
+sequence above has been verified live against a real container both
+originally (Phase 1) and again during Phase 8 bootstrap.
 
 ## Quality gate commands
 
@@ -322,8 +368,10 @@ change, reviews the apply preview, types the exact `APPLY` confirmation,
 applies it, and verifies the change actually took effect and is fully
 audited — then restores the exact records it changed (the milestone's
 date, and its own decision/proposed-change/audit rows) in a `try`/`finally`,
-so it's safe to run repeatedly without another reset in between. Not wired
-into CI yet — see `apps/web/e2e/` and `docs/DECISIONS.md`.
+so it's safe to run repeatedly without another reset in between. Wired into
+CI as of Phase 8, running against the same seeded CI database the
+unit/integration tests already used earlier in the same job, with no
+separate reset step — see `.github/workflows/ci.yml` and `apps/web/e2e/`.
 
 Before running `test:e2e` for the first time (or whenever you want a known
 starting fixture — one successful analysis, three `PENDING` mitigation
@@ -360,19 +408,19 @@ database-isolation repair."
 
 `eval:mock` runs a deterministic, offline suite of 8 scenarios against the
 production mock AI pipeline (`evals/`) — no network call, no database,
-exits nonzero on any failure; safe to run locally at any time, though it is
-not yet a CI step (Phase 8 owns further CI expansion). `eval:live` requires
-explicit opt-in (`AI_MODE=live`, `RUN_LIVE_EVALS=true`, a real
-`OPENAI_API_KEY`) and spends real provider credit; it has never been run in
-this repository — Phase 8 owns the one authorized, sanitized
-live-evaluation run and `docs/EVAL_RESULTS.md`. See
-[`evals/README.md`](evals/README.md).
+exits nonzero on any failure; safe to run locally at any time, and wired
+into CI as of Phase 8. `eval:live` requires explicit opt-in (`AI_MODE=live`,
+`RUN_LIVE_EVALS=true`, a real `OPENAI_API_KEY`) and spends real provider
+credit; it never runs automatically anywhere, including CI — Phase 8's one
+authorized, sanitized live-evaluation run is summarized in
+`docs/EVAL_RESULTS.md`. See [`evals/README.md`](evals/README.md).
 
 `test:mcp` runs `packages/mcp-server`'s Vitest suite — like `packages/core`'s
 own tests, it connects only to `missionthread_test` (validated before Prisma
 is ever imported; see `packages/mcp-server/src/test/setup-env.ts`) and never
 resets or seeds the database itself. Every test only reads: run it as many
-times in a row as you like with no reset in between. `mcp:stdio` builds a
+times in a row as you like with no reset in between. Wired into CI as of
+Phase 8. `mcp:stdio` builds a
 real `dist/cli.js` (via esbuild — see `docs/DECISIONS.md`) and starts it
 connected to stdio; it's meant to be pointed at by a local MCP client's own
 configuration (e.g. Claude Desktop's `claude_desktop_config.json`), not run
@@ -380,11 +428,15 @@ interactively on its own — stdio is reserved for MCP protocol messages, so a
 bare terminal invocation will just sit there exchanging JSON-RPC with
 nothing.
 
-All of the above except `test:e2e`, `eval:mock`, `eval:live`, and `test:mcp`
-are run in CI (`.github/workflows/ci.yml`) with `AI_MODE=mock`, so the
-pipeline never needs a live model API key.
+All of the above except `eval:live` (never run automatically anywhere) are
+run in CI (`.github/workflows/ci.yml`) with `AI_MODE=mock`, so the pipeline
+never needs a live model API key. CI additionally builds the Docker image
+(`docker build`, no run/curl step — see the Docker section above) and runs
+an informational `npm audit` scan (`continue-on-error: true` — visible in
+every run's log without blocking merges on the already-triaged findings
+documented in [Limitations](#limitations) below).
 
-## Current routes and functionality (Phase 5)
+## Current routes and functionality
 
 - `/login` — Credentials sign-in (Zod-validated, scrypt + `timingSafeEqual`
   password verification, JWT session).
@@ -717,39 +769,34 @@ application-side write failure. See `docs/SPEC.md` §9–10 and
   update/delete route exists anywhere for `AuditEvent`, but this is not
   cryptographic immutability, and a direct database administrator remains
   outside this guarantee; see `docs/THREAT_MODEL.md`.
-- **The Playwright end-to-end suite is not wired into CI yet** — it's a
-  local/manual check (`npm run test:e2e`) for now; Phase 8 owns full CI
-  browser-test expansion.
-- **`test:mcp` is not wired into CI either**, deliberately, matching the
-  same reasoning as Playwright above — it's a local/manual check
-  (`npm run test:mcp`) for now.
+- **The Playwright end-to-end suite is wired into CI as of Phase 8**
+  (`.github/workflows/ci.yml`, step "Playwright end-to-end test") — it also
+  remains runnable locally (`npm run test:e2e`).
+- **`test:mcp` is wired into CI as of Phase 8** too, for the same reason —
+  it also remains runnable locally (`npm run test:mcp`).
 - **Mock evals demonstrate pipeline and policy behavior, not general
   live-model quality** — `npm run eval:mock` proves the pipeline's
   deterministic/structural/semantic rules hold, not that a real model
-  produces good narrative output; that's `eval:live`'s job, which has not
-  been run in this repository yet. See `evals/README.md`.
-- **Remaining npm audit findings** — as of Phase 7, `npm audit` still
-  reports the same 16 findings (1 moderate, 15 high) as the prior Phase 6
-  pass; none of Phase 7's added dependencies (`@xyflow/react`,
-  `@modelcontextprotocol/sdk`, `esbuild`, and `packages/mcp-server`'s own
-  `zod`/`dotenv`/`tsx`/`vitest`) introduced a new advisory. The
-  previously-documented
-  `@prisma/dev` transitive `find-my-way`/`valibot` chain (optional
-  `prisma dev` local-tooling dependency, never invoked anywhere in this
-  repository) and Next.js's internally bundled `postcss`/`sharp` copies
-  (unreachable — no attacker-controlled CSS is ever processed, and
-  `next/image` is never imported), plus a newly-surfaced `eslint`/
-  `eslint-config-next`/`brace-expansion`/`minimatch` toolchain advisory
-  chain — a lint-time-only devDependency, never part of the running
-  application, whose only available fix is a major-version bump to
-  `eslint@10`/`eslint-config-next@0.2.4`. None of these have a compatible
-  non-breaking fix available; the alternative in every case is either an
-  upstream patch not yet released or a breaking major-version migration,
-  which would be a worse trade than the advisories themselves. See
-  `docs/DECISIONS.md`, "Phase 6 correction: dependency-advisory disposition
-  update," for the complete, current disposition of every finding,
-  including the ones already resolved in the original Phase 6 pass
-  (`next`, `next-auth`, and part of the `prisma` chain).
+  produces good narrative output; that's `eval:live`'s job. Wired into CI
+  as of Phase 8 (`eval:mock` only — `eval:live` never runs automatically
+  anywhere). See `evals/README.md` and `docs/EVAL_RESULTS.md`.
+- **Remaining npm audit findings** — as of Phase 8, `npm audit` reports 8
+  findings (1 moderate, 7 high; down from 16 as of Phase 7 — some
+  upstream advisories were resolved by non-breaking transitive-version
+  bumps picked up by a fresh `npm install` between Phase 7 and Phase 8).
+  All remaining findings are in the same two already-triaged chains: the
+  optional `@prisma/dev` local-tooling dependency's transitive
+  `find-my-way`/`valibot` (never invoked anywhere in this repository), and
+  Next.js's internally bundled `postcss`/`sharp` copies (unreachable — no
+  attacker-controlled CSS is ever processed, and `next/image` is never
+  imported). None has a compatible non-breaking fix available yet; the
+  alternative in every case is either an upstream patch not yet released or
+  a breaking major-version migration, which would be a worse trade than the
+  advisories themselves. CI now runs this same scan on every push
+  (`continue-on-error: true` — visible in the log, never blocks a merge on
+  an already-triaged finding). See `docs/DECISIONS.md`, "Phase 6
+  correction: dependency-advisory disposition update," and its Phase 8
+  follow-up, for the complete, current disposition of every finding.
 - No production cloud infrastructure, Kubernetes, queues, or public signup
   — intentionally out of scope for this MVP (`docs/SPEC.md` §3).
 

@@ -32,7 +32,8 @@
     "eval:mock": "tsx evals/run-mock.ts",
     "eval:live": "tsx evals/run-live.ts",
     "test:mcp": "npm run test --workspace @missionthread/mcp-server",
-    "mcp:stdio": "npm run build --workspace @missionthread/mcp-server && npm run start --workspace @missionthread/mcp-server"
+    "mcp:stdio": "npm run build --workspace @missionthread/mcp-server && npm run start --workspace @missionthread/mcp-server",
+    "docs:screenshots": "node scripts/capture-screenshots.mjs"
   },
   "devDependencies": {
     "eslint": "^9",
