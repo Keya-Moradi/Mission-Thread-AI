@@ -827,18 +827,19 @@ application-side write failure. See `docs/SPEC.md` §9–10 and
   as of Phase 8 (`eval:mock` only — `eval:live` never runs automatically
   anywhere). See `evals/README.md` and `docs/EVAL_RESULTS.md`.
 - **Remaining npm audit findings** — as of Phase 8's correction pass, four
-  reviewed advisory identities remain, tracked individually (not as a raw
-  count) in
+  individually reviewed advisory identities remain: three high severity,
+  one moderate — tracked by exact identity, not a raw count, in
   [`docs/DEPENDENCY_ADVISORIES.md`](docs/DEPENDENCY_ADVISORIES.md) /
-  `scripts/dependency-advisory-baseline.json`: three high severity, one
-  moderate. `npm run check:audit` gates only the high/critical references
-  (three) — all three are reviewed and accepted; zero are unreviewed. (`npm
-audit`'s own package-level summary reports "3 high, 0 moderate" because it
-  rolls each affected package up to its single highest severity, which
-  hides the one moderate advisory sharing a package with two high ones —
-  the four-identity count above is the accurate one; see
-  `docs/DEPENDENCY_ADVISORIES.md` for why a raw `npm audit` count is
-  ambiguous here.) The two affected packages are `postcss` and `sharp`,
+  `scripts/dependency-advisory-baseline.json`, the authoritative source for
+  this disposition. `npm run check:audit` blocks only the high/critical
+  identities (three) — all three are reviewed and accepted; zero are
+  unreviewed. `npm`'s own human-readable/package-level summary output can
+  vary by npm version and can under-report this: it rolls each affected
+  package up to a single highest severity, which can suppress a
+  lower-severity advisory sharing a package with a higher-severity one —
+  so a raw `npm audit` count should never be treated as authoritative here;
+  `docs/DEPENDENCY_ADVISORIES.md`'s identity-level accounting is. The two
+  affected packages are `postcss` and `sharp`,
   both bundled transitively inside `next`'s own dependency tree, never
   top-level dependencies of this project; both paths are documented as
   unreachable in this application's present usage (`postcss` is Next's

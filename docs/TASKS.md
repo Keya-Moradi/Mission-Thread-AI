@@ -1072,7 +1072,12 @@ pass's own entries.
       `docs/DEPENDENCY_ADVISORIES.md`) and **`npm run check:audit`** gate
       replace the prior informational-only, `continue-on-error` CI step —
       CI now fails on any new, unreviewed high/critical advisory, not on a
-      raw count.
+      raw count. **Hardened in a later pre-v1.0.0 pass**: the gate now
+      fails closed (never silently skips) on a high/critical advisory
+      object with no usable `via.url`/advisory ID, with 10 new Vitest
+      regression tests (`scripts/check-audit.test.mjs`) — see
+      `docs/DECISIONS.md`, "Dependency-advisory gate: fail closed on an
+      unidentified advisory."
 - [x] **CI structural hardening**: `concurrency` (cancel superseded runs of
       the same ref), `timeout-minutes: 30` on the job; verified (already
       true, now explicitly confirmed) no provider key/`RUN_LIVE_EVALS`
