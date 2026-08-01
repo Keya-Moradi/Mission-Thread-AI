@@ -15,36 +15,44 @@ program, customer, classified system, or export-controlled detail.
 
 ## Project status
 
-**Phase 7 of 8 (Digital-thread graph and MCP server) — complete.**
-Workspaces, database schema, deterministic seed data, authentication, the
-full deterministic program-analysis service layer
-(`packages/core/src/analysis`), a real database-driven dashboard/program
-overview/event-entry form/audit shell, a full AI impact-analysis pipeline
-(`packages/core/src/ai`), the complete human approval/apply workflow
-(`packages/core/src/approvals`), a full threat model, strengthened/testable
-prompt-injection boundaries, an in-memory analysis rate limiter
-(`packages/core/src/security`), a deterministic mock evaluation suite
-(`evals/`), a guarded (not yet executed) live-evaluation command, a
-database-driven, read-only React Flow digital-thread graph
-(`/programs/edgelink-x/thread`), and a local, read-only MCP server
-(`packages/mcp-server`) all exist and are verified working. A Program
-Manager can record a supplier-delay or general-update event, trigger an
-impact analysis on it (rate-limited to 3 requests per 60 seconds per
-actor), and — once it succeeds — record a decision (approve with
-structured proposed changes, reject, or request revision) on each of the
-three mitigation options; an Engineering Lead may request revision. An
-approval is reviewed on a read-only apply-preview page (old vs. proposed
-values, stale-data warnings) before a Program Manager types an exact
-confirmation and applies it, transactionally and atomically, to the real
-milestone, risk, or budget data — every step producing an append-only audit
-record. Any of the three roles can explore the whole program as a graph —
-components, requirements, milestones, risks, tests, defects, budget items,
-events, analysis runs, mitigation options, decisions, and applied changes,
-with evidence citations shown as edges — and a local operator can point an
-MCP client (e.g. Claude Desktop) at `packages/mcp-server` for six bounded,
-read-only queries over the same data. See
-[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md),
-[Phase roadmap](#phase-roadmap), and [Limitations](#limitations) below.
+**Phase 8 of 8 (Delivery) — complete.** All eight phases of
+[`docs/SPEC.md`](docs/SPEC.md) §19 are done. Workspaces, database schema,
+deterministic seed data, authentication, the full deterministic
+program-analysis service layer (`packages/core/src/analysis`), a real
+database-driven dashboard/program overview/event-entry form/audit shell, a
+full AI impact-analysis pipeline (`packages/core/src/ai`), the complete
+human approval/apply workflow (`packages/core/src/approvals`), a full
+threat model, strengthened/testable prompt-injection boundaries, an
+in-memory analysis rate limiter (`packages/core/src/security`), a
+deterministic mock evaluation suite (`evals/`), a database-driven, read-only
+React Flow digital-thread graph (`/programs/edgelink-x/thread`), and a
+local, read-only MCP server (`packages/mcp-server`) all exist and are
+verified working. A Program Manager can record a supplier-delay or
+general-update event, trigger an impact analysis on it (rate-limited to 3
+requests per 60 seconds per actor), and — once it succeeds — record a
+decision (approve with structured proposed changes, reject, or request
+revision) on each of the three mitigation options; an Engineering Lead may
+request revision. An approval is reviewed on a read-only apply-preview page
+(old vs. proposed values, stale-data warnings) before a Program Manager
+types an exact confirmation and applies it, transactionally and atomically,
+to the real milestone, risk, or budget data — every step producing an
+append-only audit record. Any of the three roles can explore the whole
+program as a graph — components, requirements, milestones, risks, tests,
+defects, budget items, events, analysis runs, mitigation options, decisions,
+and applied changes, with evidence citations shown as edges — and a local
+operator can point an MCP client (e.g. Claude Desktop) at
+`packages/mcp-server` for six bounded, read-only queries over the same data.
+Phase 8 additionally expanded CI to a real, complete gate (mock evals, MCP
+tests, Playwright, a Docker build **and** a live Docker runtime smoke test,
+and a reviewed dependency-advisory baseline — see
+[`docs/DEPENDENCY_ADVISORIES.md`](docs/DEPENDENCY_ADVISORIES.md)), added a
+Docker Compose full-stack service, ran and sanitized the one authorized
+live-evaluation call (see
+[`docs/EVAL_RESULTS.md`](docs/EVAL_RESULTS.md)), and added the
+[Screenshots](#screenshots) and [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md)
+above. See [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md),
+[Definition of done](#definition-of-done), [Phase roadmap](#phase-roadmap),
+and [Limitations](#limitations) below.
 
 Development follows a phase-gated process defined in
 [`PROJECT_GUIDE.md`](PROJECT_GUIDE.md) and [`docs/SPEC.md`](docs/SPEC.md):
@@ -97,6 +105,17 @@ event → deterministic analysis → bounded AI interpretation →
 three mitigation options → approval → apply preview → audit
 ```
 
+```mermaid
+flowchart LR
+    A[Event recorded] --> B[Deterministic analysis<br/>packages/core/src/analysis]
+    B --> C[Bounded AI interpretation<br/>mock or live LLMProvider]
+    C --> D[Three mitigation options<br/>exactly 1 recommended]
+    D --> E[Human approval<br/>approve / reject / request revision]
+    E --> F[Apply preview<br/>old vs. proposed values]
+    F --> G[Transactional apply<br/>exact confirmation required]
+    G --> H[(Append-only audit trail)]
+```
+
 Every normal calculation (schedule exposure, budget exposure, risk scoring,
 readiness) is deterministic code, never an LLM guess. The AI layer only
 explains evidence and proposes options — it can never mutate program data,
@@ -122,13 +141,14 @@ packages/core          Zod schemas, deterministic services (Phase 2, done),
                         approval/apply workflow (packages/core/src/approvals — Phase 5, done),
                         analysis rate limiter (packages/core/src/security — Phase 6, done),
                         Prisma schema/client
-packages/mcp-server     Read-only MCP server (placeholder — built in Phase 7)
+packages/mcp-server     Read-only MCP server, six bounded tools, stdio transport
+                        (Phase 7, done; hardened — Phase 8)
 docs/                   Spec, plans, tasks, decisions, architecture, threat model
 evals/                  AI pipeline evaluations (Phase 6, done)
 ```
 
 Prisma's schema is centralized in `packages/core/prisma` — both `apps/web`
-and the future `packages/mcp-server` read the database only through
+and `packages/mcp-server` read the database only through
 `packages/core`, so there is a single source of truth for the data model.
 
 Full request/data flow and the Prisma domain model are documented in
@@ -681,7 +701,7 @@ application-side write failure. See `docs/SPEC.md` §9–10 and
 
 ## Limitations
 
-- **Phase 1–7 build.** The deterministic program-logic services
+- **Phase 1–8 build, complete.** The deterministic program-logic services
   (traceability, dependency chains, verification gaps, related defects,
   schedule/budget exposure, risk scoring, readiness scoring, bounded
   evidence assembly) exist in `packages/core/src/analysis`, a real
@@ -693,10 +713,13 @@ application-side write failure. See `docs/SPEC.md` §9–10 and
   transactional, audited domain mutation, a full threat model,
   strengthened prompt-injection tests, an in-memory analysis rate limiter,
   and a mock evaluation suite (`docs/THREAT_MODEL.md`,
-  `packages/core/src/security`, `evals/`) exist, and now a read-only React
-  Flow digital-thread graph (`packages/core/src/thread`,
+  `packages/core/src/security`, `evals/`) exist, a read-only React Flow
+  digital-thread graph (`packages/core/src/thread`,
   `/programs/edgelink-x/thread`) and a local read-only MCP server
-  (`packages/mcp-server`) exist. A live-eval run is Phase 8.
+  (`packages/mcp-server`) exist, and Phase 8 completed CI expansion, a
+  Docker Compose full-stack service, a Docker build-and-runtime CI check, a
+  reviewed dependency-advisory baseline, and the one sanitized live-eval run
+  (`docs/EVAL_RESULTS.md`).
 - **The MCP server has been verified manually against a real local MCP
   client, but never through a third-party MCP host (Claude Desktop, an
   IDE integration, etc.) in this repository.** Verification here means: a
@@ -733,15 +756,18 @@ application-side write failure. See `docs/SPEC.md` §9–10 and
   overview's "Actions" section — there is no independent action
   status/assignee lifecycle. See `docs/DECISIONS.md` if this ever needs to
   become a real model.
-- **Live AI mode is unverified against the real OpenAI API in this
-  repository.** The Responses API request shape and the strict JSON-schema
-  structured-output configuration were built against the `openai` npm
-  package's published TypeScript types and Structured Outputs
-  documentation, but no automated test, smoke check, or CI step is
-  permitted to spend real API credit — only `AI_MODE=mock` runs
-  automatically anywhere in this repository. A developer with their own
-  `OPENAI_API_KEY` should treat a first live run as the actual verification
-  of that integration, not this codebase's test suite.
+- **Live AI mode has been verified once, narrowly — not continuously.**
+  Phase 8's one authorized live-evaluation run (`docs/EVAL_RESULTS.md`, 6/6
+  valid) confirmed the Responses API request shape and structured-output
+  configuration work against the real OpenAI API, on one date, with one
+  model. No automated test, smoke check, or CI step is permitted to spend
+  real API credit on an ongoing basis — only `AI_MODE=mock` runs
+  automatically anywhere in this repository, so a code change could still
+  silently break live compatibility between live-eval runs. A developer
+  with their own `OPENAI_API_KEY` should run `npm run eval:live` again
+  after a change to `packages/core/src/ai/openai-provider.ts` or
+  `openai-schema.ts` specifically, not assume the one Phase 8 run still
+  covers it indefinitely.
 - **Deterministic-equality validation trusts specific Phase 2 field names.**
   Semantic validation (`packages/core/src/ai/output-validation.ts`) compares
   a model's reported schedule/budget exposure against
@@ -812,9 +838,36 @@ application-side write failure. See `docs/SPEC.md` §9–10 and
 | **5** | **Approval and audit (state machine, apply preview, transactional apply, audit) — done**      |
 | **6** | **Security and evals (threat model, prompt-injection defenses, rate limiter, evals) — done**  |
 | **7** | **Graph and MCP (React Flow thread view, read-only MCP server) — done**                       |
-| 8     | Delivery (full CI, Docker, browser tests, live eval, polish)                                  |
+| **8** | **Delivery (full CI, Docker, browser tests, live eval, polish) — done**                       |
 
 Full detail: [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
+
+## Definition of done
+
+Mapped directly to [`docs/SPEC.md`](docs/SPEC.md) §20 — every item below is
+complete, with concrete evidence, not just asserted.
+
+| §20 requirement                                                         | Evidence                                                                                                                                                                                                                                                                                 |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Documentation can resume the project without chat history               | [`PROJECT_GUIDE.md`](PROJECT_GUIDE.md) + [`docs/SPEC.md`](docs/SPEC.md) define the process; [`docs/TASKS.md`](docs/TASKS.md) tracks detailed, resumable status; [`docs/DECISIONS.md`](docs/DECISIONS.md) records every non-obvious choice and why                                        |
+| Node is pinned consistently                                             | `.nvmrc` (`24.18.0`), `package.json` `engines` (`>=24 <25`), `Dockerfile` (`node:24-slim`), CI's `node-version-file: .nvmrc` — all four verified to agree                                                                                                                                |
+| Dev and test databases are isolated                                     | `packages/core/src/db-safety.ts`'s exact `(host, port, database)` target tuples (`LOCAL_DEV_TARGETS`/`LOCAL_TEST_TARGETS`/`GITHUB_ACTIONS_TEST_TARGETS`) — a name merely containing "test" is never sufficient                                                                           |
+| Deterministic seeds work                                                | `packages/core/prisma/seed.ts`, fixed human-readable IDs (`packages/core/src/seed/ids.ts`); exact seeded counts verified live in both `missionthread_dev` and `missionthread_test` this phase                                                                                            |
+| Demo users use hashed passwords                                         | `crypto.scrypt` + `crypto.timingSafeEqual`, full parameter validation (`packages/core/src/auth/password.ts`)                                                                                                                                                                             |
+| Server-side authorization works                                         | `recordProgramEvent()`/`runImpactAnalysis()`/`recordMitigationDecision()`/`applyApprovedChanges()` each independently re-fetch the actor's current role from the database on every call — UI role-gating is convenience only                                                             |
+| Supplier event runs end to end                                          | `apps/web/e2e/decision-workflow.spec.ts` (automated, run twice this phase with identical results) and [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md) (guided, manual) both exercise the full event → analysis → approval → apply → audit path                                              |
+| Deterministic calculations are traceable                                | `packages/core/src/analysis`; every figure a real function's output, never an LLM guess; evidence citations back every claim                                                                                                                                                             |
+| Mock AI works without credentials                                       | `AI_MODE=mock` is the default everywhere (local, CI); `generateMockImpactAnalysis()` needs no API key, verified via `npm run eval:mock` (8/8 scenarios) and 837 passing unit/integration tests                                                                                           |
+| Live AI retries once and fails safely                                   | `packages/core/src/ai/orchestrator.ts`'s two-attempt cap; proven against a real provider by [`docs/EVAL_RESULTS.md`](docs/EVAL_RESULTS.md) (6/6 valid, 0 retries needed)                                                                                                                 |
+| Exactly three options exist on success                                  | `impactAnalysisOutputSchema`'s `.refine()` (exactly 3, exactly 1 recommended), enforced structurally and tested extensively                                                                                                                                                              |
+| Source IDs are validated                                                | `validateImpactAnalysisSemantics()` — every cited ID must exist in the request's own evidence allowlist                                                                                                                                                                                  |
+| Approval and application are separate                                   | Decision page (`.../decision`) and apply-preview page (`.../apply`) are two distinct routes/steps; nothing is applied at decision time                                                                                                                                                   |
+| Changes are previewed                                                   | Apply-preview page shows old vs. proposed values and explicitly states nothing has been applied yet, before the confirmation control appears                                                                                                                                             |
+| Audit events cannot be edited or deleted through the app                | No update/delete route exists anywhere for `AuditEvent` — confirmed by repo-wide static scan (`security-boundary.test.ts`)                                                                                                                                                               |
+| Unit, integration, Playwright, mock evals, build, and Docker build pass | This phase's full local run: 837 unit/integration tests (45 web + 751 core + 41 mcp-server), Playwright 1/1 (×2, no drift), `eval:mock` 8/8, production build, Docker build, Docker Compose config all green                                                                             |
+| Sanitized live-eval results exist                                       | [`docs/EVAL_RESULTS.md`](docs/EVAL_RESULTS.md)                                                                                                                                                                                                                                           |
+| CI is complete                                                          | `.github/workflows/ci.yml`: lint, format, typecheck, unit/integration tests, MCP build + tests, mock evals, production build, smoke test, Playwright, Docker build **and** a live Docker runtime smoke test, and `check:audit` as a real gate — concurrency-grouped, job-timeout-bounded |
+| All data is fictional and unclassified                                  | Stated at the top of this README; every seeded program/supplier/person name is invented for this project                                                                                                                                                                                 |
 
 ## Development guidance
 

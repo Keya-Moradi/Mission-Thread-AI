@@ -1,0 +1,50 @@
+{
+  "$comment": "Reviewed, accepted npm audit findings — machine-readable source of truth for scripts/check-audit.mjs. Keyed by (advisoryId, package), not by total count. Every entry here is a deliberate, documented deferral, not an oversight. See docs/DEPENDENCY_ADVISORIES.md for the human-readable rendering of this same data and the full reasoning, and docs/DECISIONS.md for the dated decision entries.",
+  "reviewedAt": "2026-08-01",
+  "advisories": [
+    {
+      "advisoryId": "GHSA-6g55-p6wh-862q",
+      "package": "postcss",
+      "installedVersion": "8.4.31",
+      "dependencyPath": "next > node_modules/next/node_modules/postcss (bundled inside next's own package tree, not a top-level dependency of this project)",
+      "reachability": "Production dependency chain (next is a direct production dependency of @missionthread/web), but the vulnerable code path itself (attacker-controlled sourceMappingURL parsing) is never exercised: this application never processes CSS from an untrusted or attacker-controlled source. postcss here is Next.js's own internal build-time CSS tooling.",
+      "compatibleFixAvailable": false,
+      "fixNote": "npm audit's only listed fix is next@9.3.3, a breaking major-version downgrade (fixAvailable.isSemVerMajor: true). Not applied.",
+      "reason": "Unreachable in this application's actual usage; the only available fix is a breaking framework downgrade, a materially worse trade than the advisory itself.",
+      "reviewDate": "2026-08-01"
+    },
+    {
+      "advisoryId": "GHSA-r28c-9q8g-f849",
+      "package": "postcss",
+      "installedVersion": "8.4.31",
+      "dependencyPath": "next > node_modules/next/node_modules/postcss (bundled inside next's own package tree, not a top-level dependency of this project)",
+      "reachability": "Production dependency chain (next is a direct production dependency of @missionthread/web), but the vulnerable code path itself (path traversal via sourceMappingURL auto-loading) is never exercised: this application never processes CSS from an untrusted or attacker-controlled source. postcss here is Next.js's own internal build-time CSS tooling.",
+      "compatibleFixAvailable": false,
+      "fixNote": "npm audit's only listed fix is next@9.3.3, a breaking major-version downgrade (fixAvailable.isSemVerMajor: true). Not applied.",
+      "reason": "Unreachable in this application's actual usage; the only available fix is a breaking framework downgrade, a materially worse trade than the advisory itself.",
+      "reviewDate": "2026-08-01"
+    },
+    {
+      "advisoryId": "GHSA-qx2v-qp2m-jg93",
+      "package": "postcss",
+      "installedVersion": "8.4.31",
+      "dependencyPath": "next > node_modules/next/node_modules/postcss (bundled inside next's own package tree, not a top-level dependency of this project)",
+      "reachability": "Same as the two entries above (XSS via unescaped </style> in CSS stringify output) — reported as this package's individual severity 'moderate', included here for completeness even though the CI gate only enforces high/critical.",
+      "compatibleFixAvailable": false,
+      "fixNote": "npm audit's only listed fix is next@9.3.3, a breaking major-version downgrade (fixAvailable.isSemVerMajor: true). Not applied.",
+      "reason": "Unreachable in this application's actual usage; the only available fix is a breaking framework downgrade, a materially worse trade than the advisory itself.",
+      "reviewDate": "2026-08-01"
+    },
+    {
+      "advisoryId": "GHSA-f88m-g3jw-g9cj",
+      "package": "sharp",
+      "installedVersion": "0.34.5",
+      "dependencyPath": "next > sharp (next's optionalDependency, used only by next/image's server-side image optimization)",
+      "reachability": "Production dependency chain (an optional dependency of next, a direct production dependency of @missionthread/web), but never actually invoked: this application never imports next/image anywhere (verified by direct source search of apps/web/src), so sharp's image-processing code path never runs against any input, trusted or otherwise.",
+      "compatibleFixAvailable": false,
+      "fixNote": "npm audit's only listed fix is next@9.3.3, a breaking major-version downgrade (fixAvailable.isSemVerMajor: true). Not applied.",
+      "reason": "Unreachable — the feature that would invoke this package is never used by this application. The only available fix is a breaking framework downgrade, a materially worse trade than the advisory itself.",
+      "reviewDate": "2026-08-01"
+    }
+  ]
+}

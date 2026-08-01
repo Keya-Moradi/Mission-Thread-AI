@@ -20,5 +20,47 @@ services:
       timeout: 5s
       retries: 10
 
+  # Optional full-stack service — `npm run db:up` (`docker compose up -d
+  # postgres`) remains Postgres-only and is unaffected by this addition.
+  # Bring up both together with `docker compose up`. No credential or real
+  # DATABASE_URL is baked into the image: this service supplies them at
+  # container *runtime* only, via `environment:` below — exactly the same
+  # separation the Dockerfile's own comments and README.md's `docker run`
+  # example already document.
+  app:
+    build: .
+    container_name: missionthread-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Compose-internal network target: services on this Compose network
+      # resolve each other by service name on the container's own internal
+      # port (5432) — never the host-mapped 55432 used to reach Postgres
+      # from outside Docker's network. See docs/DECISIONS.md (2026-07-17,
+      # "Docker Compose Postgres on host port 55432").
+      DATABASE_URL: postgresql://missionthread:missionthread_local_dev_password@postgres:5432/missionthread_dev
+      # Fixed, non-secret, local-development-only placeholder — the same
+      # spirit as the Postgres password above and the documented demo
+      # account password (README.md). Override by exporting your own
+      # AUTH_SECRET before running `docker compose up` if you want a
+      # different value; this is never used anywhere beyond a developer's
+      # own local container.
+      AUTH_SECRET: ${AUTH_SECRET:-missionthread_local_dev_auth_secret_not_a_real_secret}
+      AUTH_TRUST_HOST: "true"
+      AI_MODE: mock
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    # No migrate or seed command runs here, deliberately — this service only
+    # ever runs the image's own built server (Dockerfile CMD). Before the
+    # first `docker compose up`, migrate and seed this same Postgres
+    # yourself once (host port 55432 — `npm run db:migrate` and
+    # `npm run db:seed:dev:destructive`, both requiring their own fresh
+    # authorization per docs/DECISIONS.md); Compose startup itself never
+    # clears or reseeds anything. See README.md "Docker Compose (full
+    # stack)".
+
 volumes:
   missionthread_pgdata:

@@ -933,7 +933,7 @@ Four confirmed defects fixed together. Full disposition is in
       1–6 were not reopened beyond the four confirmed-defect fixes above;
       no Phase 8 functionality was added.
 
-## Phase 8 — Delivery — in progress (2026-08-01)
+## Phase 8 — Delivery — done (2026-08-01)
 
 Full disposition for each item below is in `docs/DECISIONS.md`'s "(Phase
 8)" entries.
@@ -1011,14 +1011,108 @@ Full disposition for each item below is in `docs/DECISIONS.md`'s "(Phase
       and CI-coverage bullets refreshed to current, verified numbers (8
       findings — 1 moderate, 7 high — down from 16 as of Phase 7, same two
       already-triaged dependency chains, no new advisory).
-- [ ] **Live-evaluation run** (`docs/SPEC.md` §13/§19/§20): the one
-      authorized live-provider call against the six live-eval fixtures,
-      run directly by the project maintainer (never by this agent, which
-      never held `OPENAI_API_KEY`) per the same "an AI agent must not hold
-      a real provider credential" posture this project has followed
-      throughout. Pending as of this entry — see `docs/EVAL_RESULTS.md`
-      once complete.
-- [ ] **Final "Project status"/"Phase roadmap"/"Limitations" README rewrite
-      to Phase 8 complete**, and final full quality gate re-run (including
-      the newly-added CI-mirroring local commands), pending the
-      live-evaluation run above.
+- [x] **Live-evaluation run** (`docs/SPEC.md` §13/§19/§20): the one
+      authorized live-provider call against the six live-eval fixtures, run
+      directly by the project maintainer in their own terminal (never by
+      this agent, which never held, read, or requested `OPENAI_API_KEY`) —
+      6/6 valid, 0 invalid, `gpt-5.6-sol`. Sanitized summary in
+      `docs/EVAL_RESULTS.md`; the raw `evals/.output/live-report.json`
+      itself is gitignored and was never committed.
+- [x] **Final "Project status"/"Definition of done"/"Phase roadmap"/
+      "Limitations" README rewrite to Phase 8 complete** — see the Phase 8
+      correction pass below for the full, itemized list of what changed in
+      this final pass.
+
+## Phase 8 correction pass — CI completeness, dependency baseline, screenshot safety — done (2026-08-01)
+
+A second, more thorough review against `docs/SPEC.md` §20 and this
+project's own security rules found the initial Phase 8 pass substantial but
+incomplete in several concrete ways. Full disposition of every item below
+is in `docs/DECISIONS.md`'s "(Phase 8)" entries dated after the initial
+pass's own entries.
+
+- [x] **`docs/EVAL_RESULTS.md`** written from `evals/.output/live-report.json`
+      alone (never from the chat-relayed summary) — sanitized metadata only,
+      an explicit explanation of what "VALID" means for the
+      prompt-injection-adversarial scenario specifically, and explicit
+      bounded-sanity-check limitations language.
+- [x] **Live-eval Prisma import-boundary wording corrected** in three
+      places (`evals/README.md`, a 2026-07-24 decision entry,
+      `docs/ARCHITECTURE.md`) — the prior "never touches Prisma" claim was
+      imprecise (importing `@missionthread/core`'s root barrel does
+      construct an unconnected `PrismaClient` as a module-load side effect);
+      corrected everywhere to "never connects to, queries, or mutates the
+      database," which is the claim actually true and verified.
+- [x] **MCP built-before-test CI ordering fixed**: `.github/workflows/ci.yml`
+      now runs `npm run build --workspace @missionthread/mcp-server` before
+      `npm run test:mcp`; `built-stdio-protocol.test.ts` now fails loudly
+      (not silently skips) when `GITHUB_ACTIONS=true` and `dist/cli.js` is
+      still missing, while preserving the original skip-cleanly behavior
+      for ordinary local runs.
+- [x] **Docker Compose gained an `app` service** (Compose-internal
+      `postgres:5432` target, runtime-only credentials, no migrate/seed on
+      startup) — `npm run db:up` (Postgres-only) is unaffected. **CI gained
+      a real Docker runtime smoke test** (not just `docker build`):
+      bounded-startup, non-root-user, `AI_MODE=mock`,
+      no-`OPENAI_API_KEY`, and an authenticated database-backed HTTP check
+      via a new `apps/web/scripts/docker-runtime-check.mjs`, which reuses
+      (not duplicates) `smoke-test.mjs`'s cookie/CSRF logic via a new shared
+      `apps/web/scripts/lib/http-auth-client.mjs`. Container cleanup via
+      `trap ... EXIT`.
+- [x] **`npm audit fix` applied** (never `--force`) — resolved 5 of 8
+      findings via compatible version bumps; `package.json`'s `allowScripts`
+      updated to match (`prisma`/`@prisma/engines` 7.9.0 → 7.9.1). **New
+      identity-keyed dependency-advisory baseline**
+      (`scripts/dependency-advisory-baseline.json`,
+      `docs/DEPENDENCY_ADVISORIES.md`) and **`npm run check:audit`** gate
+      replace the prior informational-only, `continue-on-error` CI step —
+      CI now fails on any new, unreviewed high/critical advisory, not on a
+      raw count.
+- [x] **CI structural hardening**: `concurrency` (cancel superseded runs of
+      the same ref), `timeout-minutes: 30` on the job; verified (already
+      true, now explicitly confirmed) no provider key/`RUN_LIVE_EVALS`
+      anywhere in the workflow, isolated test-database target,
+      destructive-auth scoped to one step, Chromium-before-Playwright, no
+      artifact-upload step (so no failure-artifact secret-leak surface
+      exists at all).
+- [x] **Fixed a real exposure in an already-committed screenshot**:
+      `docs/assets/screenshots/03-program-overview.png` showed the seeded
+      event's untrusted note text verbatim, including the scripted
+      prompt-injection canary sentence. `scripts/capture-screenshots.mjs`
+      now hides the "Recent events" section (DOM-level, not a pixel-offset
+      clip) before that capture, and gained a `checkSeededContent()`
+      content-validation gate that refuses to run against an unexpected
+      database. The affected screenshot was regenerated (no database reset
+      required); every other screenshot was individually re-inspected and
+      confirmed clean.
+- [x] **Root `scripts/` directory wired into `npm run lint`** (was never
+      covered — a real gap, distinct from the identical fix `packages/core`
+      already got in a Phase 1 correction pass).
+- [x] Stale wording fixed: `packages/mcp-server` no longer described as a
+      "placeholder" in README's architecture tree; `evals/README.md` and
+      `docs/ARCHITECTURE.md`'s "not executed during Phase 6 — Phase 8 owns
+      the run" wording updated to reflect the run has now happened.
+- [x] **New "Definition of done" section in README.md**, mapping every
+      `docs/SPEC.md` §20 item to concrete, current evidence (file paths,
+      verified test counts, specific commands) rather than a general claim
+      of completeness. New Mermaid rendering of the protected workflow
+      spine alongside the existing ASCII version (GitHub renders Mermaid
+      natively).
+- [x] Full final verification re-run after every fix above: `node -v`,
+      `npm ci` (clean, zero unapproved scripts after an `fsevents@2.3.2`
+      `allowScripts` addition), `db:validate`, `db:generate`, `lint`,
+      `format:check`, `typecheck` (3 workspaces), `eval:mock` (8/8),
+      `build --workspace @missionthread/mcp-server`, `test` (45 web + 751
+      core + 41 mcp-server = **837**), `test:mcp` (×2, identical, no
+      drift), `build --workspace @missionthread/web`,
+      `smoke --workspace @missionthread/web` (all checks), `test:e2e` (×2,
+      identical, no drift), `docker build`, `docker compose config`,
+      `check:audit` (PASS, 3 reviewed/accepted, 0 unreviewed) — all green.
+      `db:reset:test` was **not** run this pass (no fresh authorization
+      requested or given for it); a read-only row-count check confirmed
+      `missionthread_test` already held the correct deterministic seed
+      state throughout. A final repository-wide scan for secrets/unsafe
+      content (`OPENAI_API_KEY`, `sk-`, connection strings, private-key
+      markers, session-token values, raw provider output, attribution
+      trailers, etc.) found nothing beyond expected non-secret placeholders
+      and fixed test fixtures.

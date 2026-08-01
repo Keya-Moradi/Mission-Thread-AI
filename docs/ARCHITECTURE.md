@@ -789,8 +789,12 @@ machine-readable JSON to the gitignored `evals/.output/`.
 checks, never truthy checks, verified before `createProviderFromEnv()` is
 ever called). It calls `createProviderFromEnv()` →
 `provider.generateImpactAnalysis()` directly — never `runImpactAnalysis()`
-— so it never touches Prisma or any database, and never creates a
-`Decision`/`ProposedChange` row. **At most six real HTTP requests per
+— so **it never connects to, queries, or mutates the database**, and never
+creates a `Decision`/`ProposedChange` row. (Importing `@missionthread/core`'s
+root barrel does construct an unconnected `PrismaClient` as a module-load
+side effect — see `docs/DECISIONS.md`, "Live-eval Prisma import-boundary
+wording" — but this script never issues a query against it.) **At most six
+real HTTP requests per
 invocation**: exactly six fictional fixtures (the five non-adversarial
 scenarios' fixtures plus the adversarial-notes prompt-injection fixture),
 one `for`-loop iteration per fixture with no retry/while construct around
@@ -802,9 +806,9 @@ facts (`packages/core/src/ai/openai-provider.test.ts`,
 `packages/core/src/security/live-eval-call-cap.test.ts`) that together
 make "6 fixtures" and "at most 6 HTTP requests" the same number, not a
 hopeful approximation. Every response is still validated through the same
-`validateProviderOutput()`. **Not executed during Phase 6** — Phase 8 owns
-the one authorized, sanitized live run and `docs/EVAL_RESULTS.md`, per
-`docs/SPEC.md` §13.
+`validateProviderOutput()`. **Not executed during Phase 6** (deliberately
+deferred) — Phase 8 ran the one authorized, sanitized live run; see
+`docs/EVAL_RESULTS.md`, per `docs/SPEC.md` §13.
 
 Mock evals demonstrate pipeline and policy behavior, not general live-model
 quality — see `evals/README.md`'s "What these prove (and don't)".

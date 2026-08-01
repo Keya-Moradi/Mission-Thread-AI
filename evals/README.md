@@ -123,9 +123,11 @@ through — never as an authorization or safety boundary itself. See
 
 ## `npm run eval:live`
 
-**Not run during Phase 6.** Phase 8 owns the one authorized, sanitized
-live-evaluation run and its summary in `docs/EVAL_RESULTS.md` (per
-`docs/SPEC.md` §13).
+**Not run during Phase 6 — that was deliberately deferred.** Phase 8 ran the
+one authorized, sanitized live-evaluation run; its summary is in
+`docs/EVAL_RESULTS.md` (per `docs/SPEC.md` §13). This command still never
+runs automatically anywhere (no test, smoke check, or CI step calls it) — a
+future re-run requires the same explicit, manual opt-in described below.
 
 Fails closed unless **all three** of the following are set exactly:
 
@@ -143,9 +145,15 @@ When it does run, it:
 
 - Calls the real `OpenAiImpactAnalysisProvider` directly
   (`createProviderFromEnv()` → `provider.generateImpactAnalysis()`) — it
-  never calls `runImpactAnalysis()`, so it never touches Prisma, never
-  reads or writes `missionthread_dev`/`missionthread_test`, and never
-  creates an `ImpactAnalysis`/`Decision`/`ProposedChange` row.
+  never calls `runImpactAnalysis()`. **The live-evaluation runner never
+  connects to, queries, or mutates the database:** it never reads or
+  writes `missionthread_dev`/`missionthread_test`, and never creates an
+  `ImpactAnalysis`/`Decision`/`ProposedChange` row. (Importing
+  `@missionthread/core`'s root barrel does construct an unconnected
+  `PrismaClient` instance as a module-load side effect — Prisma Client
+  never opens a network connection until a query actually runs — but this
+  script never issues one; see `docs/DECISIONS.md`, "Live-eval Prisma
+  import-boundary wording.")
 - Uses only the same fictional, offline fixtures the mock suite uses (the
   five non-adversarial scenarios' model inputs — the three adversarial,
   scripted-output scenarios test the local validator against a hand-mutated

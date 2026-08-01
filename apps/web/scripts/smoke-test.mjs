@@ -15,6 +15,13 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { config as loadEnv } from "dotenv";
 import pg from "pg";
+import {
+  CookieJar,
+  countTestId,
+  getTestIdText,
+  signIn as sharedSignIn,
+  waitForServer as sharedWaitForServer,
+} from "./lib/http-auth-client.mjs";
 
 const appDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const rootDir = path.resolve(appDir, "..", "..");
@@ -111,65 +118,6 @@ function checkRedirectToLogin(description, response) {
 }
 
 /**
- * Reads the text content of the first element carrying the given
- * data-testid attribute. Used instead of searching the whole page for a
- * bare value (e.g. `includes(">8<")`), which could pass because the number
- * happens to appear somewhere unrelated, such as a count that isn't the
- * one actually being checked.
- */
-function getTestIdText(html, testId) {
-  const match = html.match(new RegExp(`data-testid="${testId}"[^>]*>([^<]*)<`));
-  return match ? match[1].trim() : null;
-}
-
-/**
- * Counts elements carrying a given data-testid attribute. Deliberately not
- * a plain text-occurrence count: Next.js's App Router streams a serialized
- * RSC "flight" payload alongside the rendered HTML for hydration, which
- * re-embeds every rendered string a second time inside a <script> tag as
- * escaped JSON (`\"like this\"`) — a bare `html.match(/some text/g)` count
- * would therefore double-count everything. An exact, unescaped
- * `data-testid="..."` attribute match only appears in the actual rendered
- * markup, never inside that escaped payload, so this stays an accurate
- * count of real DOM elements.
- */
-function countTestId(html, testId) {
-  return (html.match(new RegExp(`data-testid="${testId}"`, "g")) ?? []).length;
-}
-
-/** Minimal cookie jar: tracks the latest value for each cookie name across
- * requests, the same way a browser (or curl -b/-c) would, since Auth.js's
- * credentials flow spans a CSRF-token request, a sign-in POST, and then
- * authenticated requests that must all share accumulated cookies. */
-class CookieJar {
-  #cookies = new Map();
-
-  absorb(response) {
-    const setCookies = response.headers.getSetCookie?.() ?? [];
-    for (const setCookie of setCookies) {
-      const [pair] = setCookie.split(";");
-      const separatorIndex = pair.indexOf("=");
-      if (separatorIndex === -1) continue;
-      const name = pair.slice(0, separatorIndex);
-      const value = pair.slice(separatorIndex + 1);
-      if (value === "" || setCookie.toLowerCase().includes("max-age=0")) {
-        this.#cookies.delete(name);
-      } else {
-        this.#cookies.set(name, value);
-      }
-    }
-  }
-
-  header() {
-    return [...this.#cookies.entries()].map(([name, value]) => `${name}=${value}`).join("; ");
-  }
-
-  hasSessionCookie() {
-    return [...this.#cookies.keys()].some((name) => name.includes("session-token"));
-  }
-}
-
-/**
  * Bounded, cleaned-up-afterward test fixtures for the Phase 5 approval
  * workflow checks below — inserted directly via `pg` (not Prisma/tsx —
  * this script stays a plain Node script, run with plain `node`, matching
@@ -262,41 +210,12 @@ class Phase5Fixtures {
   }
 }
 
-async function waitForServer() {
-  const deadline = Date.now() + START_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`${BASE_URL}/login`);
-      if (res.status === 200) return;
-    } catch {
-      // Server not accepting connections yet — keep polling.
-    }
-    await sleep(300);
-  }
-  throw new Error(`Server did not become ready within ${START_TIMEOUT_MS}ms`);
+function waitForServer() {
+  return sharedWaitForServer(BASE_URL, START_TIMEOUT_MS);
 }
 
-async function signIn(jar, email, password) {
-  const csrfRes = await fetch(`${BASE_URL}/api/auth/csrf`);
-  jar.absorb(csrfRes);
-  const { csrfToken } = await csrfRes.json();
-
-  const body = new URLSearchParams({
-    email,
-    password,
-    csrfToken,
-    redirectTo: "/",
-    json: "true",
-  });
-
-  const signInRes = await fetch(`${BASE_URL}/api/auth/callback/credentials`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: jar.header() },
-    body: body.toString(),
-    redirect: "manual",
-  });
-  jar.absorb(signInRes);
-  return signInRes;
+function signIn(jar, email, password) {
+  return sharedSignIn(BASE_URL, jar, email, password);
 }
 
 async function main() {
